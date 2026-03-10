@@ -7,7 +7,7 @@
 # for the test suite to pass (the install script only runs past its root check when this
 # script is root; the test suite adapts expectations when run as root).
 #
-# From repo root: sudo ./scripts/testing/run_kcov_macos.sh
+# From repo root: sudo ./testing/run_kcov_macos.sh  (or sudo ./scripts/testing/run_kcov_macos.sh if scripts live in scripts/)
 # Opens coverage at coverage/index.html when done. Modifies /Users/* (adds/updates .zshrc and cert path).
 
 set -e
@@ -23,8 +23,15 @@ run_kcov() {
     kcov "$@" || true
 }
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT_DIR="$REPO_ROOT/scripts"
+# Support both layouts: testing/ at repo root, or scripts/testing/ under repo root
+TESTING_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$TESTING_DIR/../install_certs_macos.sh" ]; then
+    REPO_ROOT="$(cd "$TESTING_DIR/.." && pwd)"
+    SCRIPT_DIR="$REPO_ROOT"
+else
+    REPO_ROOT="$(cd "$TESTING_DIR/../.." && pwd)"
+    SCRIPT_DIR="$REPO_ROOT/scripts"
+fi
 INSTALL="$SCRIPT_DIR/install_certs_macos.sh"
 VALIDATE="$SCRIPT_DIR/validate_install_macos.sh"
 COV_ROOT="$REPO_ROOT/coverage"
@@ -48,6 +55,8 @@ rm -rf "$COV_TMP" "$COV_ROOT"
 mkdir -p "$COV_TMP"
 
 INCLUDE="--include-path=$SCRIPT_DIR"
+# For merged report path when uploading or opening
+COV_MERGED="$COV_ROOT/kcov-merged"
 
 echo "Collecting coverage for install_certs_macos.sh (no-root paths)..."
 run_kcov $INCLUDE --collect-only "$COV_TMP/install_help" "$INSTALL" --help
@@ -95,7 +104,11 @@ kcov $INCLUDE --merge "$COV_ROOT" "${MERGE_DIRS[@]}"
 rm -rf "$COV_TMP"
 
 echo "Running test suite..."
-"$REPO_ROOT/scripts/testing/test_install_certs_macos.sh"
+if [ -f "$REPO_ROOT/testing/test_install_certs_macos.sh" ]; then
+    "$REPO_ROOT/testing/test_install_certs_macos.sh"
+else
+    "$REPO_ROOT/scripts/testing/test_install_certs_macos.sh"
+fi
 
 # So the user who ran sudo can open the report without sudo
 if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
@@ -103,9 +116,9 @@ if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
 fi
 
 echo ""
-echo "Coverage report: $COV_ROOT/index.html (merged: $COV_ROOT/kcov-merged/index.html)"
-if [ -f "$COV_ROOT/kcov-merged/index.html" ]; then
-    open "$COV_ROOT/kcov-merged/index.html" 2>/dev/null || true
+echo "Coverage report: $COV_ROOT/index.html (merged: $COV_MERGED/index.html)"
+if [ -f "$COV_MERGED/index.html" ]; then
+    open "$COV_MERGED/index.html" 2>/dev/null || true
 elif [ -f "$COV_ROOT/index.html" ]; then
     open "$COV_ROOT/index.html" 2>/dev/null || true
 fi
