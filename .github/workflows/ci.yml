@@ -25,4 +25,7 @@ jobs:
 
       - name: Run Windows tests
         shell: pwsh
-        run: ./testing/test_install_certs_windows.ps1
+        run: |
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "testing/test_install_certs_windows.ps1"
+          $p = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath -Wait -Verb RunAs -PassThru
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }

@@ -11,9 +11,9 @@
 # Either (-CertName AND -ExtractPath) OR -UseCert must be provided.
 # If user had a different env path, it is replaced with the new path; new PEM is first, other PEMs from the old file are appended (dedupe by fingerprint).
 #
+# Must run as Administrator (or SYSTEM). Exits with error otherwise.
 # When run as SYSTEM/admin with -CertName: installs PEM and User-level env per user (each user's profile).
-# When run as normal user with -CertName: installs to current user's profile and User-level env.
-# When run with -UseCert: sets env to that path (Machine if admin, User if not); no per-user PEM.
+# When run with -UseCert: sets Machine-level env to that path; no per-user PEM.
 
 param(
     [Parameter(Mandatory = $false)]
@@ -31,6 +31,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+$isSystemContext = ($env:USERNAME -eq 'SYSTEM') -or ($env:USERPROFILE -like '*systemprofile*')
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not ($isSystemContext -or $isAdmin)) {
+    Write-Error "Error: this script must be run as Administrator. Run PowerShell as Administrator (e.g. right-click -> Run as administrator)."
+    exit 1
+}
 
 # UTF-8 without BOM so PEM starts with "-----BEGIN" (Set-Content -Encoding UTF8 adds BOM on PowerShell 5.1 and breaks parsing).
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
@@ -307,8 +314,6 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
     }
 }
 
-$isSystemContext = ($env:USERNAME -eq 'SYSTEM') -or ($env:USERPROFILE -like '*systemprofile*')
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $certStore = if ($isSystemContext -or $isAdmin) { "LocalMachine" } else { "CurrentUser" }
 
 # --- Extract from store (when -CertName -ExtractPath): get PEM once ---

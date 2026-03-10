@@ -99,6 +99,12 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
 
     $Nonexistent = Join-Path $TempDir "nonexistent.pem"
 
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Error "This test script must be run as Administrator. Run PowerShell as Administrator (e.g. right-click -> Run as administrator)."
+        exit 1
+    }
+
     Write-Host "=== install_certs_windows.ps1 CLI tests ==="
 
     # No cert source (only -Package; no parameter set selected)
@@ -172,6 +178,32 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         }
     }
 
+    # Helper: set Machine NODE_EXTRA_CA_CERTS and clear User so validate uses system-level env. Requires admin. Restores both in finally.
+    function Invoke-ValidateWithMachinePath {
+        param([string]$Path, [string]$ExpectedSubject = "test-cert")
+        $scriptEscaped = $ValidateScript -replace "'", "''"
+        $cmd = "& '$scriptEscaped' -ExpectedSubject '$ExpectedSubject'; exit `$LASTEXITCODE"
+        $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
+        Write-Host "    [run] Invoke-ValidateWithMachinePath Path='$Path' ExpectedSubject='$ExpectedSubject'"
+        $savedUser = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "User")
+        $savedMachine = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
+        try {
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $Path, "Machine")
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $null, "User")
+            $stdoutFile = Join-Path $TempDir "out_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
+            $stderrFile = Join-Path $TempDir "err_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
+            $p = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+            $stdout = if (Test-Path $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
+            $stderr = if (Test-Path $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
+            Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+            Write-Host "    [ExitCode] $($p.ExitCode) | Stdout: <$stdout> | Stderr: <$stderr>"
+            return @{ ExitCode = $p.ExitCode; Stdout = $stdout; Stderr = $stderr }
+        } finally {
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedUser, "User")
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedMachine, "Machine")
+        }
+    }
+
     # Current user env: no paths set → WARN, exit 0 (use -Command so -ExpectedSubject is passed)
     $Run++
     $scriptEscaped = $ValidateScript -replace "'", "''"
@@ -215,6 +247,16 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     if ($r3.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r3.ExitCode)"; $script:Fail++ }
     $Run++
     if (($r3.Stdout + " " + $r3.Stderr) -match "no cert|matching|FAIL|subject|Result:.*failed") { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
+
+    # System-level (Machine) env: valid PEM. Validate reads User then Machine; we set only Machine and clear User.
+    $Run++
+    $rMachine = Invoke-ValidateWithMachinePath -Path $CertPath -ExpectedSubject "test-cert"
+    if ($rMachine.ExitCode -eq 0) { Write-Host "  OK ($Run): system-level env path valid PEM (exit 0)"; $script:Pass++ } else {
+        Write-Host "  FAIL ($Run): expected exit 0, got $($rMachine.ExitCode)"
+        Write-Host "    Stdout: $($rMachine.Stdout)"
+        Write-Host "    Stderr: $($rMachine.Stderr)"
+        $script:Fail++
+    }
 
     Write-Host ""
     Write-Host "---------------------------------------------------"

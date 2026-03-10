@@ -160,7 +160,7 @@ Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match). No admin required; the script uses a temp directory and creates a valid PEM (self-signed from cert store when possible, or an embedded minimal PEM if store access is denied, e.g. on some VMs).
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, including admin-required check when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (i.e. **scripts/**).
 
@@ -178,7 +178,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). |
 | **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message). |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
@@ -265,20 +265,19 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 ### Overview
 
-`install_certs_windows.ps1` configures **Node/npm** and/or **Python/pip** on Windows to use a custom CA certificate. It:
+`install_certs_windows.ps1` configures **Node/npm** and/or **Python/pip** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
-- Either **extracts** one certificate from the Windows cert store (LocalMachine\Root or CurrentUser\Root by context) by **subject name pattern**, or **uses an existing** PEM file you provide.
-- When run as **admin (or SYSTEM):** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user.
-- When run as **normal user:** writes to the current user’s profile and sets **User**-level env vars for the current user only.
-- When run with **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars (if admin) or **User**-level (if not). When setting Machine, the script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
+- Either **extracts** one certificate from the Windows cert store (LocalMachine\Root) by **subject name pattern**, or **uses an existing** PEM file you provide (**-UseCert**).
+- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user.
+- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
 
 Re-runs **merge** certs: if the target file already exists, the script saves its content, overwrites with the new cert, then appends other certs from the saved copy (dedupe by SHA-256 fingerprint). So running with a second cert adds it to the bundle instead of replacing it.
 
 ### Requirements
 
 - **Windows** with PowerShell.
-- **Admin** (or SYSTEM) for per-user install and for Machine-level env when using **-UseCert**.
-- When using **-CertName:** the certificate must exist in the store and match **exactly one** cert by subject substring.
+- **Run as Administrator** (or SYSTEM). The script checks and exits with an error if not elevated.
+- When using **-CertName:** the certificate must exist in LocalMachine\Root and match **exactly one** cert by subject substring.
 
 ### How to use
 
@@ -321,9 +320,10 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 ### Summary (Windows)
 
+- **Admin required.** The script must be run as Administrator (or SYSTEM).
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
 - **Extract path:** per-user **package-route.pem** and User-level env; re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** no PEM written; Machine (if admin) or User env set; when Machine is set, User-level cert vars are **deleted** so only Machine applies.
+- **UseCert:** no PEM written; Machine-level env set; User-level cert vars are **deleted** so only Machine applies.
 
 Users must start a **new terminal** for env changes to take effect.
 
