@@ -25,12 +25,4 @@ jobs:
 
       - name: Run Windows tests
         shell: pwsh
-        run: |
-          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "testing/test_install_certs_windows.ps1"
-          $outFile = Join-Path $env:GITHUB_WORKSPACE "test-output.txt"
-          $scriptPathEscaped = $scriptPath -replace "'", "''"
-          $outFileEscaped = $outFile -replace "'", "''"
-          $cmd = "& '$scriptPathEscaped' 2>&1 | Out-File -FilePath '$outFileEscaped' -Encoding utf8; exit `$LASTEXITCODE"
-          $p = Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd -Wait -Verb RunAs -PassThru
-          if (Test-Path $outFile) { Get-Content $outFile -Raw; Remove-Item $outFile -ErrorAction SilentlyContinue }
-          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+        run: ./testing/test_install_certs_windows.ps1
