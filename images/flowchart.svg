@@ -1,0 +1,105 @@
+<svg viewBox="0 0 900 1250" xmlns="http://www.w3.org/2000/svg">
+  <rect width="900" height="1250" fill="#ffffff" />
+  <style>
+    .box { fill: #f8f9fa; stroke: #333; stroke-width: 2; }
+    .decision { fill: #fff3cd; stroke: #856404; stroke-width: 2; }
+    .process { fill: #d1ecf1; stroke: #0c5460; stroke-width: 2; }
+    .error { fill: #f8d7da; stroke: #721c24; stroke-width: 2; }
+    .end { fill: #d4edda; stroke: #155724; stroke-width: 2; }
+    text { font-family: sans-serif; font-size: 13px; text-anchor: middle; }
+    .arrow { stroke: #333; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+    .label { font-size: 11px; fill: #666; }
+  </style>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+  </defs>
+
+  <rect x="375" y="20" width="150" height="40" rx="20" class="end" />
+  <text x="450" y="45">Start Script</text>
+
+  <rect x="350" y="90" width="200" height="50" class="decision" />
+  <text x="450" y="115">Is User Root?</text>
+  
+  <rect x="620" y="90" width="180" height="50" class="error" />
+  <text x="710" y="120">Exit: Must use sudo</text>
+
+  <rect x="350" y="170" width="200" height="50" class="decision" />
+  <text x="450" y="195">OpenSSL Found?</text>
+
+  <rect x="100" y="170" width="180" height="50" class="decision" />
+  <text x="190" y="195">--install-dependencies?</text>
+
+  <rect x="100" y="260" width="180" height="50" class="process" />
+  <text x="190" y="290">Install via Homebrew</text>
+
+  <rect x="620" y="170" width="180" height="50" class="error" />
+  <text x="710" y="200">Exit: OpenSSL Missing</text>
+
+  <rect x="350" y="350" width="200" height="60" class="decision" />
+  <text x="450" y="380">Source Type?</text>
+
+  <rect x="150" y="450" width="220" height="70" class="process" />
+  <text x="260" y="475">Search Keychain via regex</text>
+  <text x="260" y="495">(security find-certificate)</text>
+
+  <rect x="150" y="550" width="220" height="50" class="decision" />
+  <text x="260" y="580">Exactly 1 Match?</text>
+
+  <rect x="10" y="550" width="120" height="50" class="error" />
+  <text x="70" y="580">Exit: Error</text>
+
+  <rect x="530" y="450" width="220" height="50" class="process" />
+  <text x="640" y="480">Validate File Path</text>
+
+  <rect x="100" y="650" width="700" height="480" rx="15" fill="none" stroke="#666" stroke-dasharray="8,4" />
+  <text x="450" y="675" font-weight="bold" font-size="16px">FOR EACH USER IN /Users/*</text>
+
+  <rect x="300" y="700" width="300" height="40" class="process" />
+  <text x="450" y="725">Create Dir &amp; Write new PEM</text>
+
+  <rect x="300" y="770" width="300" height="60" class="decision" />
+  <text x="450" y="795">Existing Env Export Found?</text>
+  <text x="450" y="815">(NODE/PIP path)</text>
+
+  <rect x="500" y="880" width="250" height="180" rx="10" fill="#f0faff" stroke="#0056b3" />
+  <text x="625" y="905" font-weight="bold">Merge Logic</text>
+  <text x="625" y="930">1. Extract blocks from old file</text>
+  <text x="625" y="955">2. Check Fingerprint (SHA256)</text>
+  <text x="625" y="980">3. If NOT duplicate &amp; NOT new cert:</text>
+  <text x="625" y="1005">APPEND to new PEM file</text>
+  <text x="625" y="1040" font-style="italic" font-size="11px">(bundle_merge_into_target)</text>
+
+  <rect x="150" y="880" width="250" height="60" class="process" />
+  <text x="275" y="905">Add fresh Exports to .zshrc</text>
+  <text x="275" y="925">(NODE_USE_SYSTEM_CA=1)</text>
+
+  <rect x="375" y="1170" width="150" height="40" rx="20" class="end" />
+  <text x="450" y="1195">Complete!</text>
+
+  <line x1="450" y1="60" x2="450" y2="90" class="arrow" />
+  <line x1="550" y1="115" x2="620" y2="115" class="arrow" />
+  <line x1="450" y1="140" x2="450" y2="170" class="arrow" />
+  <line x1="550" y1="195" x2="620" y2="195" class="arrow" />
+  <line x1="350" y1="195" x2="280" y2="195" class="arrow" />
+  <line x1="190" y1="220" x2="190" y2="260" class="arrow" />
+  <line x1="450" y1="220" x2="450" y2="350" class="arrow" />
+  
+  <path d="M 450 410 L 450 430 L 260 430 L 260 450" class="arrow" />
+  <path d="M 450 410 L 450 430 L 640 430 L 640 450" class="arrow" />
+  
+  <line x1="260" y1="520" x2="260" y2="550" class="arrow" />
+  <line x1="150" y1="575" x2="130" y2="575" class="arrow" />
+  
+  <line x1="450" y1="740" x2="450" y2="770" class="arrow" />
+  
+  <path d="M 450 830 L 450 850 L 275 850 L 275 880" class="arrow" />
+  <text x="350" y="845" class="label">New Install</text>
+  
+  <path d="M 450 830 L 450 850 L 625 850 L 625 880" class="arrow" />
+  <text x="550" y="845" class="label">Migration</text>
+
+  <line x1="450" y1="1130" x2="450" y2="1170" class="arrow" />
+</svg>
