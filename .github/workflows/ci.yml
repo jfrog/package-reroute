@@ -17,55 +17,6 @@ jobs:
       - name: Run macOS tests
         run: ./testing/test_install_certs_macos.sh
 
-      - name: Install kcov
-        run: brew install kcov
-
-      - name: Run kcov (coverage)
-        run: sudo ./testing/run_kcov_macos.sh
-
-      - name: Extract coverage for summary
-        id: coverage
-        run: |
-          PERCENT=""
-          # Prefer merged report: kcov --merge writes to coverage/ (and possibly coverage/kcov-merged/)
-          for cov_json in coverage/coverage.json coverage/kcov-merged/coverage.json; do
-            if [ -f "$cov_json" ]; then
-              PERCENT=$(jq -r '.percent_covered // empty' "$cov_json" 2>/dev/null || true)
-              [ -n "$PERCENT" ] && break
-            fi
-          done
-          if [ -z "$PERCENT" ]; then
-            COV_JSON=$(find coverage -name 'coverage.json' 2>/dev/null | head -1)
-            if [ -n "$COV_JSON" ] && [ -f "$COV_JSON" ]; then
-              PERCENT=$(jq -r '.percent_covered // empty' "$COV_JSON" 2>/dev/null || true)
-            fi
-          fi
-          if [ -z "$PERCENT" ]; then
-            for html in coverage/kcov-merged/index.html coverage/index.html; do
-              if [ -f "$html" ]; then
-                PERCENT=$(grep -oE 'Total: [0-9.]+%|[0-9.]+% *covered' "$html" 2>/dev/null | head -1 | grep -oE '[0-9.]+' || true)
-                [ -n "$PERCENT" ] && break
-              fi
-            done
-          fi
-          {
-            echo "## macOS test & coverage"
-            echo ""
-            echo "| Item | Result |"
-            echo "|------|--------|"
-            echo "| Tests | \`./testing/test_install_certs_macos.sh\` (pass) |"
-            echo "| Coverage (merged) | **${PERCENT:-unknown}%** (kcov) |"
-            echo ""
-            echo "Coverage report (merged) is available as the \`coverage-macos\` artifact."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-macos
-          path: coverage/
-          if-no-files-found: ignore
-
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest

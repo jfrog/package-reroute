@@ -27,7 +27,7 @@ RUN=0
 PASS=0
 FAIL=0
 
-# When test script runs as root (e.g. sudo run_kcov_macos.sh), install/validate scripts also run as root,
+# When test script runs as root (e.g. sudo ./testing/test_install_certs_macos.sh), install/validate scripts also run as root,
 # so we skip tests that expect "run as root" / "exit 1 when not root" and --all-users requiring root.
 ARE_ROOT=0
 [ "$(id -u)" -eq 0 ] && ARE_ROOT=1

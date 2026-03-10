@@ -149,17 +149,6 @@ cd scripts && ./testing/test_install_certs_macos.sh
 
 Exit code 0 if all tests pass, 1 otherwise.
 
-**Line coverage (kcov):** With [kcov](https://github.com/SimonKagstrom/kcov) installed (`brew install kcov`), run:
-
-```bash
-sudo ./scripts/testing/run_kcov_macos.sh
-```
-
-- **sudo is required.** The script exits with an error if not run as root. Running as root ensures (1) the install script runs past its root check so coverage includes `validate_pem`, `get_export_path`, `write_merged_pem_file`, `add_exports_to_file`, and (2) the test suite passes (it adapts expectations when run as root). Without sudo you get low coverage and failing tests.
-- **Report:** Coverage is written to `coverage/`; the merged report is `coverage/kcov-merged/index.html` and is opened in the browser when the script finishes. The directory is chown'd to the user who ran sudo so the HTML can be opened without sudo.
-- **Keychain coverage:** The script runs the install with several `--cert-name` patterns (e.g. "Amazon Root CA 1", "Apple Root CA", "DigiCert Root"). If exactly one cert matches on your machine, that run covers `read_blocks_from_file`, `bundle_contains_pem`, `merge_certs_into_target`, `write_merged_pem_file`, and `canonical_path`. If none match, those branches stay uncovered.
-- **Note:** The run modifies `/Users/*` (adds/updates each user's `.zshrc` and cert path); use in a VM or disposable environment if that is a concern.
-
 #### Test coverage
 
 | Area | Covered | Not covered |
@@ -167,7 +156,7 @@ sudo ./scripts/testing/run_kcov_macos.sh
 | **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`pip` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
 | **validate_install_macos.sh** | **CLI:** unknown option (exit 1); missing `--expected-subject` (exit 1). **Main paths:** default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
 
-Tests are black-box (exit codes and stderr). Use `run_kcov_macos.sh` for line coverage of no-root paths; install happy path and Keychain extraction remain manual or integration-only.
+Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
