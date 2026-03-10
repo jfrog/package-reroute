@@ -41,7 +41,7 @@ COV_TMP="$REPO_ROOT/coverage_tmp"
 [ -x "$VALIDATE" ] || { echo "Error: $VALIDATE not found or not executable" >&2; exit 1; }
 command -v kcov >/dev/null 2>&1 || { echo "Error: kcov not on PATH (e.g. brew install kcov)" >&2; exit 1; }
 
-# Temp PEM for validate --cert-path runs
+# Temp PEM for validate (mock home) runs
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 openssl req -x509 -nodes -newkey rsa:2048 -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
@@ -82,11 +82,8 @@ run_kcov $INCLUDE --collect-only "$COV_TMP/install_use_cert_npm_only" "$INSTALL"
 run_kcov $INCLUDE --collect-only "$COV_TMP/install_use_cert_pip_only" "$INSTALL" --package pip --use-cert "$TMP/cert.pem"
 
 echo "Collecting coverage for validate_install_macos.sh..."
-run_kcov $INCLUDE --collect-only "$COV_TMP/validate_help" "$VALIDATE" --help
-run_kcov $INCLUDE --collect-only "$COV_TMP/validate_cert_ok" "$VALIDATE" --cert-path "$TMP/cert.pem"
-run_kcov $INCLUDE --collect-only "$COV_TMP/validate_cert_bad" "$VALIDATE" --cert-path "$TMP/invalid.pem"
-HOME="$MOCK_HOME" run_kcov $INCLUDE --collect-only "$COV_TMP/validate_mock_home" "$VALIDATE"
-run_kcov $INCLUDE --collect-only "$COV_TMP/validate_expected_subject" "$VALIDATE" --cert-path "$TMP/cert.pem" --expected-subject "test-cert"
+run_kcov $INCLUDE --collect-only "$COV_TMP/validate_required" $VALIDATE
+HOME="$MOCK_HOME" run_kcov $INCLUDE --collect-only "$COV_TMP/validate_mock_home" "$VALIDATE" --expected-subject test-cert
 
 echo "Merging coverage..."
 MERGE_DIRS=(
@@ -96,8 +93,7 @@ MERGE_DIRS=(
     "$COV_TMP"/install_unknown_option "$COV_TMP"/install_keychain_nomatch
     "$COV_TMP"/install_keychain_Amazon_Root_CA_1 "$COV_TMP"/install_keychain_Apple_Root_CA "$COV_TMP"/install_keychain_DigiCert_Root
     "$COV_TMP"/install_use_cert_npm_only "$COV_TMP"/install_use_cert_pip_only
-    "$COV_TMP"/validate_help "$COV_TMP"/validate_cert_ok "$COV_TMP"/validate_cert_bad
-    "$COV_TMP"/validate_mock_home "$COV_TMP"/validate_expected_subject
+    "$COV_TMP"/validate_required "$COV_TMP"/validate_mock_home
 )
 kcov $INCLUDE --merge "$COV_ROOT" "${MERGE_DIRS[@]}"
 
@@ -116,7 +112,7 @@ if [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
 fi
 
 echo ""
-echo "Coverage report: $COV_ROOT/index.html (merged: $COV_MERGED/index.html)"
+echo "Coverage report (merged): $COV_MERGED/index.html"
 if [ -f "$COV_MERGED/index.html" ]; then
     open "$COV_MERGED/index.html" 2>/dev/null || true
 elif [ -f "$COV_ROOT/index.html" ]; then

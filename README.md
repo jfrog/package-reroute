@@ -114,7 +114,6 @@ sudo ./install_certs_macos.sh \
 | Option | Description |
 |--------|--------------|
 | *(none)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. |
-| `--cert-path <path>` | Validate only this PEM file (exists and contains at least one valid certificate). |
 | `--all-users` | **(Root only.)** For each user in `/Users/*`, read their `~/.zshrc`, resolve cert paths, and validate each PEM. Use: `sudo ./validate_install_macos.sh --all-users`. |
 | `--expected-subject <pattern>` | Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
 
@@ -124,16 +123,10 @@ sudo ./install_certs_macos.sh \
 
 ```bash
 # After install: validate current user’s config and cert path(s)
-./validate_install_macos.sh
-
-# Validate a specific PEM file
-./validate_install_macos.sh --cert-path /opt/certs/package-route.pem
+./validate_install_macos.sh --expected-subject Zscaler
 
 # Validate every user’s config (run as root)
-sudo ./validate_install_macos.sh --all-users
-
-# Also require at least one cert to have subject containing "Zscaler"
-./validate_install_macos.sh --expected-subject Zscaler
+sudo ./validate_install_macos.sh --expected-subject Zscaler --all-users
 ```
 
 ---
@@ -172,13 +165,13 @@ sudo ./scripts/testing/run_kcov_macos.sh
 | Area | Covered | Not covered |
 |------|--------|-------------|
 | **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`pip` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
-| **validate_install_macos.sh** | **CLI:** `--help`; unknown option (exit 1). **Main paths:** `--cert-path` valid PEM (exit 0), missing file (exit 1), and invalid PEM content (existing file but not valid cert → exit 1, "not a valid PEM"/FAIL); default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
+| **validate_install_macos.sh** | **CLI:** unknown option (exit 1); missing `--expected-subject` (exit 1). **Main paths:** default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
 
 Tests are black-box (exit codes and stderr). Use `run_kcov_macos.sh` for line coverage of no-root paths; install happy path and Keychain extraction remain manual or integration-only.
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation) and **validate_install_windows.ps1** (help, single-path validation, missing file, invalid PEM, `-ExpectedSubject` match and no-match). No admin required; the script uses a temp directory and creates a valid PEM (self-signed from cert store when possible, or an embedded minimal PEM if store access is denied, e.g. on some VMs).
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match). No admin required; the script uses a temp directory and creates a valid PEM (self-signed from cert store when possible, or an embedded minimal PEM if store access is denied, e.g. on some VMs).
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (i.e. **scripts/**).
 
@@ -197,7 +190,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 | Area | Covered |
 |------|--------|
 | **install_certs_windows.ps1** | No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). |
-| **validate_install_windows.ps1** | `-Help` (exit 0, usage); unknown param; `-CertPath` with valid PEM (exit 0), missing file (exit 1), invalid PEM content (exit 1); `-ExpectedSubject` with matching subject (exit 0) and non-matching subject (exit 1, FAIL message). |
+| **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message). |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
 
@@ -349,28 +342,20 @@ Users must start a **new terminal** for env changes to take effect.
 
 ### Windows: validate_install_windows.ps1
 
-**validate_install_windows.ps1** checks that the certificate installation is valid: PEM file(s) exist and are valid (same validation as the install script). It does **not** require admin unless you use `-AllUsers`.
+**validate_install_windows.ps1** checks that the certificate installation is valid: PEM file(s) exist and are valid (same validation as the install script). **-ExpectedSubject is required.** It does **not** require admin unless you use `-AllUsers`.
 
 | Parameter | Description |
 |-----------|-------------|
-| *(none)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user's environment (User then Machine), then validate each referenced PEM file. |
-| `-CertPath <path>` | Validate only this PEM file (exists and contains at least one valid certificate). |
+| `-ExpectedSubject <pattern>` | **Required.** Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
 | `-AllUsers` | **(Admin only.)** For each user in `C:\Users\*`, read their User registry env, resolve cert paths, and validate each PEM. |
-| `-ExpectedSubject <pattern>` | Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
-| `-Help` | Print usage and exit. |
+| *(no path param)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user's environment (User then Machine), then validate each referenced PEM file. |
 
 **Exit code:** 0 if all checks passed, 1 if any check failed.
 
 ```powershell
 # After install: validate current user's env and cert path(s)
-.\validate_install_windows.ps1
-
-# Validate a specific PEM file
-.\validate_install_windows.ps1 -CertPath C:\Users\Administrator\certs\npm\package-route.pem
+.\validate_install_windows.ps1 -ExpectedSubject Zscaler
 
 # Validate every user's config (run as Administrator)
-.\validate_install_windows.ps1 -AllUsers
-
-# Also require at least one cert to have subject containing "Zscaler"
-.\validate_install_windows.ps1 -ExpectedSubject Zscaler
+.\validate_install_windows.ps1 -ExpectedSubject Zscaler -AllUsers
 ```

@@ -119,36 +119,30 @@ assert_exit 1 "'$INSTALL_SCRIPT' --package pip 2>/dev/null"
 echo ""
 echo "=== validate_install_macos.sh tests (temp PEM and mock home) ==="
 
-# validate_install_macos.sh CLI
-assert_exit 0 "'$VALIDATE_SCRIPT' --help | head -1"
+# validate_install_macos.sh CLI: --expected-subject is required
+assert_exit 1 "'$VALIDATE_SCRIPT' 2>/dev/null"
+assert_stderr "expected-subject is required" "'$VALIDATE_SCRIPT' 2>&1"
 assert_exit 1 "'$VALIDATE_SCRIPT' --unknown 2>/dev/null"
 assert_stderr "Unknown option" "'$VALIDATE_SCRIPT' --unknown 2>&1"
-
-# validate_install_macos.sh --cert-path with valid PEM
-assert_exit 0 "'$VALIDATE_SCRIPT' --cert-path '$TMP/cert.pem'"
-assert_exit 1 "'$VALIDATE_SCRIPT' --cert-path '$TMP/nonexistent.pem' 2>/dev/null"
-# --cert-path with existing file but invalid PEM content
-assert_exit 1 "'$VALIDATE_SCRIPT' --cert-path '$TMP/invalid.pem' 2>/dev/null"
-assert_stderr "not a valid PEM|FAIL" "'$VALIDATE_SCRIPT' --cert-path '$TMP/invalid.pem' 2>&1"
 
 # Mock home with .zshrc pointing at our cert
 MOCK_HOME="$TMP/home"
 mkdir -p "$MOCK_HOME"
 echo "export NODE_EXTRA_CA_CERTS=\"$TMP/cert.pem\"" > "$MOCK_HOME/.zshrc"
-assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT'"
+assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
 echo "export REQUESTS_CA_BUNDLE=\"$TMP/cert.pem\"" >> "$MOCK_HOME/.zshrc"
-assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT'"
+assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
 
 # Point .zshrc at missing file: should fail
 echo "export NODE_EXTRA_CA_CERTS=\"$TMP/missing.pem\"" > "$MOCK_HOME/.zshrc"
-assert_exit 1 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' 2>/dev/null"
+assert_exit 1 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert 2>/dev/null"
 
 # --all-users without root: must fail; when root it succeeds
 if [ "$ARE_ROOT" -eq 0 ]; then
-    assert_exit 1 "'$VALIDATE_SCRIPT' --all-users 2>/dev/null"
-    assert_stderr "requires root|--all-users requires root" "'$VALIDATE_SCRIPT' --all-users 2>&1"
+    assert_exit 1 "'$VALIDATE_SCRIPT' --expected-subject test-cert --all-users 2>/dev/null"
+    assert_stderr "requires root|--all-users requires root" "'$VALIDATE_SCRIPT' --expected-subject test-cert --all-users 2>&1"
 else
-    assert_exit 0 "'$VALIDATE_SCRIPT' --all-users 2>/dev/null"
+    assert_exit 0 "'$VALIDATE_SCRIPT' --expected-subject test-cert --all-users 2>/dev/null"
 fi
 
 echo ""

@@ -1,35 +1,17 @@
-# Validate certificate installation: PEM file(s) exist and are valid; optionally check env vars per user.
-# Run as any user. Use -AllUsers (as admin) to check every user's config.
-#
-# Use after install_certs_windows.ps1 to confirm PEM files exist and are valid. No admin needed for current user;
-# use -CertPath to check a specific file, or -AllUsers as admin to check every user's registry env and cert paths.
-# Exit 0 = all checks passed.
-#
-# Usage:
-#   .\validate_install_windows.ps1                    # Validate current user's cert path(s) from env (User then Machine)
-#   .\validate_install_windows.ps1 -CertPath PATH      # Validate only this PEM file
-#   .\validate_install_windows.ps1 -AllUsers           # (Admin only) Validate each user's env and cert path(s)
+# Validate certificate installation: PEM file(s) exist and are valid; require subject match.
+# See README for usage. -ExpectedSubject is required. Exit 0 = all checks passed.
 
 param(
-    [string]$CertPath = "",
     [switch]$AllUsers,
-    [string]$ExpectedSubject = "",
-    [switch]$Help
+    [string]$ExpectedSubject = ""
 )
 
 $ErrorActionPreference = 'Stop'
 $script:FailCount = 0
 
-function Show-Help {
-    Write-Host "Usage: $($MyInvocation.MyCommand.Name) [-CertPath <path>] [-AllUsers] [-ExpectedSubject <pattern>] [-Help]"
-    Write-Host ""
-    Write-Host "  -CertPath <path>       Validate only this PEM file (exists and valid PEM)."
-    Write-Host "  -AllUsers              (Admin only) Validate each user's registry env and cert path(s)."
-    Write-Host "  -ExpectedSubject <pat> Require at least one cert in each PEM file to have subject matching <pat> (case-insensitive)."
-    Write-Host "  -Help                  Print this help."
-    Write-Host ""
-    Write-Host "With no options: reads NODE_EXTRA_CA_CERTS and REQUESTS_CA_BUNDLE from current user's"
-    Write-Host "environment (User then Machine) and validates each referenced PEM file."
+if ([string]::IsNullOrWhiteSpace($ExpectedSubject)) {
+    Write-Error "Error: -ExpectedSubject is required."
+    exit 1
 }
 
 # Validate file exists and contains at least one valid PEM cert (same logic as install_certs_windows.ps1).
@@ -88,21 +70,19 @@ function Validate-Pem {
         $script:FailCount++
         return $false
     }
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedSubject)) {
-        $blocks = Get-PemBlocksFromFile -Path $Path
-        $found = $false
-        foreach ($block in $blocks) {
-            $subject = Get-SubjectFromPemBlock -PemBlock $block
-            if ($subject -and $subject.IndexOf($ExpectedSubject, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                $found = $true
-                break
-            }
+    $blocks = Get-PemBlocksFromFile -Path $Path
+    $found = $false
+    foreach ($block in $blocks) {
+        $subject = Get-SubjectFromPemBlock -PemBlock $block
+        if ($subject -and $subject.IndexOf($ExpectedSubject, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $found = $true
+            break
         }
-        if (-not $found) {
-            Write-Host "  FAIL: no cert in $Path has subject matching: $ExpectedSubject" -ForegroundColor Red
-            $script:FailCount++
-            return $false
-        }
+    }
+    if (-not $found) {
+        Write-Host "  FAIL: no cert in $Path has subject matching: $ExpectedSubject" -ForegroundColor Red
+        $script:FailCount++
+        return $false
     }
     Write-Host "  OK: valid PEM at $Path"
     return $true
@@ -170,15 +150,7 @@ function Get-OtherUserCertPaths {
 
 # --- Main ---
 
-if ($Help) {
-    Show-Help
-    exit 0
-}
-
-if ($CertPath) {
-    Write-Host "Validating single cert path: $CertPath"
-    Validate-Pem -Path $CertPath | Out-Null
-} elseif ($AllUsers) {
+if ($AllUsers) {
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
         Write-Host "Error: -AllUsers requires admin. Run as Administrator." -ForegroundColor Red

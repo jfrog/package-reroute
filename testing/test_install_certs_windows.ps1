@@ -20,49 +20,31 @@ if (-not (Test-Path -LiteralPath $ValidateScript -PathType Leaf)) {
 $TempDir = [System.IO.Path]::GetTempPath() + [Guid]::NewGuid().ToString("N").Substring(0, 8)
 New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 try {
-    # Create a valid PEM: try self-signed from cert store; fallback to embedded PEM (e.g. when store access denied on VM)
-    $cert = $null
-    $pemCreated = $false
-    try {
-        $cert = New-SelfSignedCertificate -CertStoreLocation Cert:\CurrentUser\My -Subject "CN=test-cert-windows" -NotAfter (Get-Date).AddDays(1) -KeyExportPolicy Exportable -KeyUsage CertSign -ErrorAction Stop
-        $bytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-        $b64 = [Convert]::ToBase64String($bytes)
-        $pem = "-----BEGIN CERTIFICATE-----`r`n" + ($b64 -replace '(.{64})', '$1`r`n') + "`r`n-----END CERTIFICATE-----"
-        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-        [System.IO.File]::WriteAllText((Join-Path $TempDir "cert.pem"), $pem, $utf8NoBom)
-        $pemCreated = $true
-    } catch {
-        try {
-            $cert = New-SelfSignedCertificate -CertStoreLocation Cert:\LocalMachine\My -Subject "CN=test-cert-windows" -NotAfter (Get-Date).AddDays(1) -KeyExportPolicy Exportable -KeyUsage CertSign -ErrorAction Stop
-            $bytes = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)
-            $b64 = [Convert]::ToBase64String($bytes)
-            $pem = "-----BEGIN CERTIFICATE-----`r`n" + ($b64 -replace '(.{64})', '$1`r`n') + "`r`n-----END CERTIFICATE-----"
-            $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-            [System.IO.File]::WriteAllText((Join-Path $TempDir "cert.pem"), $pem, $utf8NoBom)
-            $pemCreated = $true
-        } catch { }
-    } finally {
-        if ($cert) {
-            Remove-Item -LiteralPath $cert.PSPath -Delete -ErrorAction SilentlyContinue
-        }
-    }
-    if (-not $pemCreated) {
-        # Fallback: minimal valid PEM (166-byte; empty subject - skip -ExpectedSubject tests below when using this)
-        $fallbackPem = @"
------BEGIN CERTIFICATE-----
-MFAwRgIBADADBgEAMAAwHhcNNTAwMTAxMDAwMDAwWhcNNDkxMjMxMjM1OTU5WjAA
-MBgwCwYJKoZIhvcNAQEBAwkAMAYCAQACAQAwAwYBAAMBAA==
------END CERTIFICATE-----
-"@
-        $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-        [System.IO.File]::WriteAllText((Join-Path $TempDir "cert.pem"), $fallbackPem.Trim(), $utf8NoBom)
-    }
-    $UsingFallbackPem = -not $pemCreated
+    # Valid PEM with subject CN=test-cert-windows (generated: openssl req -x509 -nodes -newkey rsa:2048 -subj "/CN=test-cert-windows" -days 3650)
     $CertPath = Join-Path $TempDir "cert.pem"
-    if (-not (Test-Path -LiteralPath $CertPath -PathType Leaf)) {
-        Write-Error "Failed to create temp PEM at $CertPath"
-        exit 1
-    }
+    $embeddedPem = @'
+-----BEGIN CERTIFICATE-----
+MIIDGTCCAgGgAwIBAgIUfjPrjG6+dJgm2iGavSVZsQ8GdmUwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRdGVzdC1jZXJ0LXdpbmRvd3MwHhcNMjYwMzEwMTYxMTA5
+WhcNMzYwMzA3MTYxMTA5WjAcMRowGAYDVQQDDBF0ZXN0LWNlcnQtd2luZG93czCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMZhh/eVPr+G6Kmk1MkZQIWI
+zDpH87uHNNKqUs3dzsJ1qw6t00II/t69L8i8pO7Rz0zFY2Qf1he++ZCGExfb8wxB
+QgvNx9GvdtCS9jGxuOjWhb9M9Rk+hKUST2frzLwV9vCRzdSZaUGOspUj4VhfoW6X
+c7agWkVm5p9ygC/lLYAFNuITWVAMRGktnWJHV3vK0x+b2XHF4tQBIng/J1AT8pb9
+6dB29u0yOE7kpHbyA4EtlDF/LioP7CIxDDU/qlZlxLaCvrPA6Zuhnx6r+nzhkRwk
+4y/90mmGr5SuWtOCObNjRx9J9s2Eql4KXAMMv2DzaC/Agw+2BeT1NWj/Q8vJvz8C
+AwEAAaNTMFEwHQYDVR0OBBYEFBnly6MR2qd4OQC/K/IjhgVNxVAJMB8GA1UdIwQY
+MBaAFBnly6MR2qd4OQC/K/IjhgVNxVAJMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZI
+hvcNAQELBQADggEBAH1gZqN/40N10OPJjPIx1iDK14C0Pti8Um9Dv2eYSwrn7ZZ1
+JSrJ6Boeevy1VQFx2gYXyQWDywf/hfaEJXy1OrwOkKGpAlft2H9n3tk1VGffXWNV
+Sabx04KvcybkEynuVQ9XX+H92zfL1nkvyothYT2VssMnwlKZbCL84Bm1PQpXY/Fx
+I9wVBXto0FkCgSTzxOwr3Kk5grc61Hp6gevBwsBpbtZl52wtavdTjwzTgZvQEMWt
+rHRJMjbyf1IzDJAqq2Bi3+Cl+QtDmguvwGvs/AINia/V0CbNw5fmj7FtwO+Z77d8
+jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
+-----END CERTIFICATE-----
+'@
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($CertPath, $embeddedPem.Trim(), $utf8NoBom)
     "not a certificate" | Set-Content -Path (Join-Path $TempDir "invalid.pem") -Encoding UTF8
     $InvalidPath = Join-Path $TempDir "invalid.pem"
 
@@ -75,8 +57,10 @@ MBgwCwYJKoZIhvcNAQEBAwkAMAYCAQACAQAwAwYBAAMBAA==
     function Invoke-ScriptAndGetExitCode {
         param([string]$ScriptPath, [array]$Args = @())
         $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $Args
+        Write-Host "    [run] powershell -NoProfile -ExecutionPolicy Bypass -File '$ScriptPath' $($Args -join ' ')"
         $stdoutFile = Join-Path $TempDir "out_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
         $stderrFile = Join-Path $TempDir "err_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
+        Write-Host "    [Start-Process] powershell.exe -ArgumentList: $($allArgs -join ' ')"
         $p = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
         $stdout = if (Test-Path $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
         $stderr = if (Test-Path $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
@@ -89,6 +73,7 @@ MBgwCwYJKoZIhvcNAQEBAwkAMAYCAQACAQAwAwYBAAMBAA==
         $script:Run++
         $r = Invoke-ScriptAndGetExitCode -ScriptPath $ScriptPath -Args $Args
         $got = $r.ExitCode
+         Write-Host "    ExitCode: $got | Stdout: <$($r.Stdout)> | Stderr: <$($r.Stderr)>"
         if ($got -eq $Expected) {
             Write-Host "  OK ($Run): exit $Expected"
             $script:Pass++
@@ -158,76 +143,78 @@ MBgwCwYJKoZIhvcNAQEBAwkAMAYCAQACAQAwAwYBAAMBAA==
     Write-Host ""
     Write-Host "=== validate_install_windows.ps1 tests ==="
 
-    # -Help
-    $Run++
-    $helpR = Invoke-ScriptAndGetExitCode -ScriptPath $ValidateScript -Args @("-Help")
-    if ($helpR.ExitCode -eq 0 -and (($helpR.Stdout + $helpR.Stderr) -match "Usage|CertPath|Help|Validat")) {
-        Write-Host "  OK ($Run): -Help exits 0 and shows usage"
-        $script:Pass++
-    } else {
-        Write-Host "  FAIL ($Run): -Help"
-        $script:Fail++
-    }
+    # -ExpectedSubject is required
+    Assert-ExitCode -Expected 1 -ScriptPath $ValidateScript -Args @()
+    Assert-Stderr -Pattern "ExpectedSubject is required" -ScriptPath $ValidateScript -Args @()
 
-    # Unknown param: may error (exit 1) or be ignored and validate env (exit 0)
-    $Run++
-    $unkR = Invoke-ScriptAndGetExitCode -ScriptPath $ValidateScript -Args @("-UnknownArg")
-    if ($unkR.ExitCode -eq 0 -or $unkR.ExitCode -eq 1) {
-        Write-Host "  OK ($Run): unknown param (exit $($unkR.ExitCode))"
-        $script:Pass++
-    } else {
-        Write-Host "  FAIL ($Run): unknown param exit $($unkR.ExitCode)"
-        $script:Fail++
-    }
-
-    # Helper: run validate with path read from a temp file in the child (avoids cmd-line path parsing issues)
-    function Invoke-ValidateWithPath {
-        param([string]$Path, [string]$ExpectedSubject = "")
-        $pathFile = Join-Path $TempDir "validate_path.txt"
-        [System.IO.File]::WriteAllText($pathFile, $Path, [System.Text.UTF8Encoding]::new($false))
-        $env:TEST_VALIDATE_PATH_FILE = $pathFile
-        $env:TEST_VALIDATE_SCRIPT = $ValidateScript
-        $env:TEST_VALIDATE_SUBJECT = $ExpectedSubject
-        $cmd = '& { $p = Get-Content -Raw $env:TEST_VALIDATE_PATH_FILE; $a = @("-CertPath", $p.Trim()); if ($env:TEST_VALIDATE_SUBJECT) { $a += "-ExpectedSubject", $env:TEST_VALIDATE_SUBJECT }; & $env:TEST_VALIDATE_SCRIPT @a; exit $LASTEXITCODE }'
+    # Helper: set User NODE_EXTRA_CA_CERTS before child, run validate in child, clear after.
+    function Invoke-ValidateWithEnvPath {
+        param([string]$Path, [string]$ExpectedSubject = "test-cert")
+        $scriptEscaped = $ValidateScript -replace "'", "''"
+        $cmd = "& '$scriptEscaped' -ExpectedSubject '$ExpectedSubject'; exit `$LASTEXITCODE"
         $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
-        $stdoutFile = Join-Path $TempDir "out_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
-        $stderrFile = Join-Path $TempDir "err_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
-        $p = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
-        $stdout = if (Test-Path $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
-        $stderr = if (Test-Path $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
-        Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
-        Remove-Item $pathFile -ErrorAction SilentlyContinue
-        return @{ ExitCode = $p.ExitCode; Stdout = $stdout; Stderr = $stderr }
+        Write-Host "    [run] Invoke-ValidateWithEnvPath Path='$Path' ExpectedSubject='$ExpectedSubject'"
+        $saved = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "User")
+        try {
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $Path, "User")
+            $stdoutFile = Join-Path $TempDir "out_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
+            $stderrFile = Join-Path $TempDir "err_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
+            Write-Host "    [Start-Process] powershell.exe -ArgumentList: -NoProfile -ExecutionPolicy Bypass -Command <...>"
+            $p = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+            $stdout = if (Test-Path $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile) } else { "" }
+            $stderr = if (Test-Path $stderrFile) { [System.IO.File]::ReadAllText($stderrFile) } else { "" }
+            Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+            Write-Host "    [ExitCode] $($p.ExitCode) | Stdout: <$stdout> | Stderr: <$stderr>"
+            Write-Host "    [return] @{ ExitCode = $($p.ExitCode); Stdout = <$stdout>; Stderr = <$stderr> }"
+            return @{ ExitCode = $p.ExitCode; Stdout = $stdout; Stderr = $stderr }
+        } finally {
+            [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $saved, "User")
+        }
     }
 
-    # -CertPath with valid PEM
-    Assert-ExitCode -Expected 0 -ScriptPath $ValidateScript -Args @("-CertPath", $CertPath)
-
-    # -CertPath with missing file (path via file so child receives it)
+    # Current user env: no paths set → WARN, exit 0 (use -Command so -ExpectedSubject is passed)
     $Run++
-    $r = Invoke-ValidateWithPath -Path $Nonexistent
+    $scriptEscaped = $ValidateScript -replace "'", "''"
+    $cmd = "& '$scriptEscaped' -ExpectedSubject 'test-cert'; exit `$LASTEXITCODE"
+    $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
+    $stdoutFile = Join-Path $TempDir "out_warn.txt"
+    $stderrFile = Join-Path $TempDir "err_warn.txt"
+    $p = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
+    if ($p.ExitCode -eq 0) { Write-Host "  OK ($Run): no paths set (exit 0)"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 0, got $($p.ExitCode)"; $script:Fail++ }
+    Remove-Item $stdoutFile, $stderrFile -ErrorAction SilentlyContinue
+
+    # Env path: valid PEM (subject contains "test-cert")
+    $Run++
+    $r0 = Invoke-ValidateWithEnvPath -Path $CertPath -ExpectedSubject "test-cert"
+    if ($r0.ExitCode -eq 0) { Write-Host "  OK ($Run): env path valid PEM (exit 0)"; $script:Pass++ } else {
+        Write-Host "  FAIL ($Run): expected exit 0, got $($r0.ExitCode)"
+        Write-Host "    Stdout: $($r0.Stdout)"
+        Write-Host "    Stderr: $($r0.Stderr)"
+        $script:Fail++
+    }
+
+    # Env path: missing file
+    $Run++
+    $r = Invoke-ValidateWithEnvPath -Path $Nonexistent
     if ($r.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r.ExitCode)"; $script:Fail++ }
     $Run++
     $out = $r.Stdout + " " + $r.Stderr
     if ($out -match "does not exist|FAIL|file does not|exist:|check\(s\) failed" -or ($r.ExitCode -eq 1 -and $out.Trim().Length -gt 0)) { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
 
-    # -CertPath with invalid PEM content
+    # Env path: invalid PEM content
     $Run++
-    $r2 = Invoke-ValidateWithPath -Path $InvalidPath
+    $r2 = Invoke-ValidateWithEnvPath -Path $InvalidPath
     if ($r2.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r2.ExitCode)"; $script:Fail++ }
-    Assert-Stderr -Pattern "not a valid PEM|FAIL|valid PEM" -ScriptPath $ValidateScript -Args @("-CertPath", $InvalidPath)
+    $Run++
+    $out2 = $r2.Stdout + " " + $r2.Stderr
+    if ($out2 -match "not a valid PEM|FAIL|valid PEM") { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
 
-    # -ExpectedSubject tests (skip when using fallback PEM - that cert has empty subject)
-    if (-not $UsingFallbackPem) {
-        # Subject contains "test-cert"
-        Assert-ExitCode -Expected 0 -ScriptPath $ValidateScript -Args @("-CertPath", $CertPath, "-ExpectedSubject", "test-cert")
-        # Pattern that doesn't match (path via file)
-        $Run++
-        $r3 = Invoke-ValidateWithPath -Path $CertPath -ExpectedSubject "Zscaler"
-        if ($r3.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r3.ExitCode)"; $script:Fail++ }
-        $Run++
-        if (($r3.Stdout + " " + $r3.Stderr) -match "no cert|matching|FAIL|subject|Result:.*failed") { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
-    }
+    # Subject mismatch
+    $Run++
+    $r3 = Invoke-ValidateWithEnvPath -Path $CertPath -ExpectedSubject "Zscaler"
+    if ($r3.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r3.ExitCode)"; $script:Fail++ }
+    $Run++
+    if (($r3.Stdout + " " + $r3.Stderr) -match "no cert|matching|FAIL|subject|Result:.*failed") { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
 
     Write-Host ""
     Write-Host "---------------------------------------------------"

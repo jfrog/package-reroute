@@ -1,27 +1,14 @@
 #!/usr/bin/env bash
-# Validate certificate installation: PEM file(s) exist and are valid; optionally check .zshrc exports.
-# Run as any user. Use --all-users (as root) to check every user's config.
-#
-# Use after install_certs_macos.sh to confirm PEM files exist and are valid. No root needed for current user; use --cert-path to check a specific file, or --all-users as root to check every user's .zshrc and their cert paths. Exit 0 = all checks passed.
-#
-# Usage:
-#   ./validate_install_macos.sh                    # Validate current user's cert path(s) from ~/.zshrc
-#   ./validate_install_macos.sh --cert-path PATH   # Validate only this PEM file
-#   sudo ./validate_install_macos.sh --all-users   # Validate each user's .zshrc and their cert path(s)
-#   ./validate_install_macos.sh --expected-subject "Zscaler"  # Also require at least one cert in the bundle to match subject
+# Validate certificate installation: PEM file(s) exist and are valid; require subject match.
+# See README for usage. --expected-subject is required. Exit 0 = all checks passed.
 
 set -e
 
-CERT_PATH=""
 ALL_USERS=0
 EXPECTED_SUBJECT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --cert-path)
-            CERT_PATH="${2:?Error: --cert-path requires a value}"
-            shift 2
-            ;;
         --all-users)
             ALL_USERS=1
             shift
@@ -30,24 +17,17 @@ while [[ $# -gt 0 ]]; do
             EXPECTED_SUBJECT="${2:?Error: --expected-subject requires a value}"
             shift 2
             ;;
-        -h|--help)
-            echo "Usage: $0 [--cert-path <path>] [--all-users] [--expected-subject <pattern>]"
-            echo ""
-            echo "  --cert-path <path>       Validate only this PEM file (exists and valid PEM)."
-            echo "  --all-users              (Root only) Validate each user's .zshrc and cert path(s)."
-            echo "  --expected-subject <pat> Require at least one cert in each PEM file to have subject matching <pat> (case-insensitive)."
-            echo "  -h, --help               Print this help."
-            echo ""
-            echo "With no options: reads NODE_EXTRA_CA_CERTS and REQUESTS_CA_BUNDLE from current user's ~/.zshrc,"
-            echo "expands ~ to home, and validates each referenced PEM file."
-            exit 0
-            ;;
         *)
             echo "Unknown option: $1" >&2
             exit 1
             ;;
     esac
 done
+
+if [ -z "$EXPECTED_SUBJECT" ]; then
+    echo "Error: --expected-subject is required." >&2
+    exit 1
+fi
 
 export PATH="/usr/bin:/opt/homebrew/opt/openssl/bin:/opt/homebrew/bin:/usr/local/opt/openssl/bin:/usr/local/bin:$PATH"
 
@@ -68,25 +48,23 @@ validate_pem() {
             return 1
         fi
     fi
-    if [ -n "$EXPECTED_SUBJECT" ]; then
-        local content rest block subject found=0
-        content=$(cat "$path")
-        rest="$content"
-        while [[ "$rest" == *"-----BEGIN CERTIFICATE-----"* ]]; do
-            rest="${rest#*-----BEGIN CERTIFICATE-----}"
-            rest="-----BEGIN CERTIFICATE-----${rest}"
-            block="${rest%%-----END CERTIFICATE-----*}-----END CERTIFICATE-----"
-            subject=$(printf '%s' "$block" | openssl x509 -noout -subject 2>/dev/null)
-            if [ -n "$subject" ] && echo "$subject" | grep -qi "$EXPECTED_SUBJECT"; then
-                found=1
-                break
-            fi
-            rest="${rest#*-----END CERTIFICATE-----}"
-        done
-        if [ $found -eq 0 ]; then
-            echo "  FAIL: no cert in $path has subject matching: $EXPECTED_SUBJECT"
-            return 1
+    local content rest block subject found=0
+    content=$(cat "$path")
+    rest="$content"
+    while [[ "$rest" == *"-----BEGIN CERTIFICATE-----"* ]]; do
+        rest="${rest#*-----BEGIN CERTIFICATE-----}"
+        rest="-----BEGIN CERTIFICATE-----${rest}"
+        block="${rest%%-----END CERTIFICATE-----*}-----END CERTIFICATE-----"
+        subject=$(printf '%s' "$block" | openssl x509 -noout -subject 2>/dev/null)
+        if [ -n "$subject" ] && echo "$subject" | grep -qi "$EXPECTED_SUBJECT"; then
+            found=1
+            break
         fi
+        rest="${rest#*-----END CERTIFICATE-----}"
+    done
+    if [ $found -eq 0 ]; then
+        echo "  FAIL: no cert in $path has subject matching: $EXPECTED_SUBJECT"
+        return 1
     fi
     echo "  OK: valid PEM at $path"
     return 0
@@ -131,10 +109,7 @@ validate_user_config() {
     fi
 }
 
-if [ -n "$CERT_PATH" ]; then
-    echo "Validating single cert path: $CERT_PATH"
-    validate_pem "$CERT_PATH" || FAIL=$((FAIL+1))
-elif [ "$ALL_USERS" -eq 1 ]; then
+if [ "$ALL_USERS" -eq 1 ]; then
     # --all-users reads /Users/* and each user's .zshrc; requires root to access other users' homes.
     if [ "$(id -u)" -ne 0 ]; then
         echo "Error: --all-users requires root. Use: sudo $0 --all-users" >&2
