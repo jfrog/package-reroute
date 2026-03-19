@@ -147,6 +147,63 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     }
 
     Write-Host ""
+    Write-Host "=== install_certs_windows.ps1 pip / UV_NATIVE_TLS flow ==="
+
+    # -UseCert -Package pip: install sets Machine UV_NATIVE_TLS=1 and REQUESTS_CA_BUNDLE to cert path; verify and clean up
+    $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+    $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
+    try {
+        $rPip = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-Package", "pip")
+        $Run++
+        if ($rPip.ExitCode -ne 0) {
+            Write-Host "  FAIL ($Run): -UseCert -Package pip expected exit 0, got $($rPip.ExitCode)"
+            $script:Fail++
+        } else {
+            $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $req = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
+            if ($uv -eq "1" -and $req -eq $CertPath) {
+                Write-Host "  OK ($Run): -Package pip sets UV_NATIVE_TLS=1 and REQUESTS_CA_BUNDLE"
+                $script:Pass++
+            } else {
+                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req' (expected '$CertPath')"
+                $script:Fail++
+            }
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
+        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
+    }
+
+    # -UseCert -Package all: verify npm and pip vars set (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE)
+    $savedNode = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
+    $savedNodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
+    try {
+        $rAll = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-Package", "all")
+        $Run++
+        if ($rAll.ExitCode -ne 0) {
+            Write-Host "  FAIL ($Run): -UseCert -Package all expected exit 0, got $($rAll.ExitCode)"
+            $script:Fail++
+        } else {
+            $uvAll = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $reqAll = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
+            $nodeAll = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
+            $nodeSysAll = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
+            if ($nodeSysAll -eq "1" -and $nodeAll -eq $CertPath -and $uvAll -eq "1" -and $reqAll -eq $CertPath) {
+                Write-Host "  OK ($Run): -Package all sets NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE"
+                $script:Pass++
+            } else {
+                Write-Host "  FAIL ($Run): NODE_USE_SYSTEM_CA='$nodeSysAll' NODE_EXTRA_CA_CERTS='$nodeAll' UV_NATIVE_TLS='$uvAll' REQUESTS_CA_BUNDLE='$reqAll'"
+                $script:Fail++
+            }
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedNode, "Machine")
+        [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $savedNodeSys, "Machine")
+        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
+        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
+    }
+
+    Write-Host ""
     Write-Host "=== validate_install_windows.ps1 tests ==="
 
     # -ExpectedSubject is required

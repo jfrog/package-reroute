@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [--package npm|pip|all] [--cert-name <pattern> --extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|pip|all      Configure npm (NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA), pip (REQUESTS_CA_BUNDLE), or both (default: all)"
+            echo "  --package npm|pip|all      Configure npm (NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA), pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE), or both (default: all)"
             echo "  --cert-name <pattern>      Wildcard/regex to match exactly one cert in keychain (requires --extract-path)"
             echo "  --extract-path <path>      Path under each user's home (writes ~/<path>/package-route.pem) (requires --cert-name)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --cert-name/--extract-path)"
@@ -273,6 +273,34 @@ replace_export_in_file() {
     ' "$f" > "$tmp" && mv "$tmp" "$f"
 }
 
+# Ensure NODE_USE_SYSTEM_CA=1: add if missing, replace if value != 1, leave as-is if already 1.
+ensure_node_use_system_ca() {
+    local f="$1" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q '^export NODE_USE_SYSTEM_CA=' "$f" 2>/dev/null; then
+        echo "export NODE_USE_SYSTEM_CA=1" >> "$f"
+    else
+        current=$(grep -E '^export NODE_USE_SYSTEM_CA=' "$f" 2>/dev/null | head -1 | sed -E 's/^export NODE_USE_SYSTEM_CA=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "1" ]; then
+            replace_export_in_file "$f" "NODE_USE_SYSTEM_CA" "1"
+        fi
+    fi
+}
+
+# Ensure UV_NATIVE_TLS=1: add if missing, replace if value != 1, leave as-is if already 1.
+ensure_uv_native_tls() {
+    local f="$1" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q '^export UV_NATIVE_TLS=' "$f" 2>/dev/null; then
+        echo "export UV_NATIVE_TLS=1" >> "$f"
+    else
+        current=$(grep -E '^export UV_NATIVE_TLS=' "$f" 2>/dev/null | head -1 | sed -E 's/^export UV_NATIVE_TLS=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "1" ]; then
+            replace_export_in_file "$f" "UV_NATIVE_TLS" "1"
+        fi
+    fi
+}
+
 if [ -n "$USE_CERT" ]; then
     echo "[1/3] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
@@ -330,11 +358,11 @@ add_exports_to_file() {
         P=$(get_export_path "$f" "NODE_EXTRA_CA_CERTS" "$expand_home")
         if [ -z "$P" ]; then
             echo "" >> "$f"
-            echo "export NODE_USE_SYSTEM_CA=1" >> "$f"
+            ensure_node_use_system_ca "$f"
             echo "export NODE_EXTRA_CA_CERTS=\"$cert_path\"" >> "$f"
         else
             replace_export_in_file "$f" "NODE_EXTRA_CA_CERTS" "$cert_path"
-            grep -q '^export NODE_USE_SYSTEM_CA=' "$f" 2>/dev/null || echo "export NODE_USE_SYSTEM_CA=1" >> "$f"
+            ensure_node_use_system_ca "$f"
         fi
     fi
 
@@ -342,9 +370,11 @@ add_exports_to_file() {
         P=$(get_export_path "$f" "REQUESTS_CA_BUNDLE" "$expand_home")
         if [ -z "$P" ]; then
             echo "" >> "$f"
+            ensure_uv_native_tls "$f"
             echo "export REQUESTS_CA_BUNDLE=\"$cert_path\"" >> "$f"
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
+            ensure_uv_native_tls "$f"
         fi
     fi
 }
@@ -400,7 +430,7 @@ if [ -n "$USE_CERT" ]; then
 else
     echo "   Certificate exported to each user's cert path (owned by user)."
 fi
-echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or REQUESTS_CA_BUNDLE added to each user's existing .zshrc."
+echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or UV_NATIVE_TLS / REQUESTS_CA_BUNDLE added to each user's existing .zshrc."
 
 echo "---------------------------------------------------"
 echo "[3/3] COMPLETE!"

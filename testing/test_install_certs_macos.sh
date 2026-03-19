@@ -285,6 +285,215 @@ else
 fi
 
 echo ""
+echo "=== NODE_USE_SYSTEM_CA ensure logic (add / replace / leave as-is) ==="
+
+# Helpers matching install_certs_macos.sh ensure_node_use_system_ca + replace_export_in_file (use TMP for temp files)
+replace_export_in_file_test() {
+    local f="$1" var="$2" new_value="$3"
+    [ ! -f "$f" ] && return 1
+    local tmp escaped
+    escaped="${new_value//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    tmp=$(mktemp "$TMP/zshrc.XXXXXX")
+    awk -v var="$var" -v val="$escaped" '
+        $0 ~ "^export " var "=" { print "export " var "=\"" val "\""; next }
+        { print }
+    ' "$f" > "$tmp" && mv "$tmp" "$f"
+}
+ensure_node_use_system_ca_test() {
+    local f="$1" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q '^export NODE_USE_SYSTEM_CA=' "$f" 2>/dev/null; then
+        echo "export NODE_USE_SYSTEM_CA=1" >> "$f"
+    else
+        current=$(grep -E '^export NODE_USE_SYSTEM_CA=' "$f" 2>/dev/null | head -1 | sed -E 's/^export NODE_USE_SYSTEM_CA=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "1" ]; then
+            replace_export_in_file_test "$f" "NODE_USE_SYSTEM_CA" "1"
+        fi
+    fi
+}
+count_node_use_system_ca_lines() {
+    grep -c '^export NODE_USE_SYSTEM_CA=' "$1" 2>/dev/null || echo 0
+}
+get_node_use_system_ca_value() {
+    grep -E '^export NODE_USE_SYSTEM_CA=' "$1" 2>/dev/null | head -1 | sed -E 's/^export NODE_USE_SYSTEM_CA=//' | sed -E 's/^["'\'']//;s/["'\'']$//'
+}
+
+# 1) NODE_USE_SYSTEM_CA does not exist → add "export NODE_USE_SYSTEM_CA=1"
+echo "" > "$TMP/z1"
+ensure_node_use_system_ca_test "$TMP/z1"
+n=$(count_node_use_system_ca_lines "$TMP/z1")
+val=$(get_node_use_system_ca_value "$TMP/z1")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): no NODE_USE_SYSTEM_CA → add one line with value 1"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2) NODE_USE_SYSTEM_CA exists and value != 1 → replace with 1
+echo "export NODE_USE_SYSTEM_CA=0" > "$TMP/z2"
+ensure_node_use_system_ca_test "$TMP/z2"
+n=$(count_node_use_system_ca_lines "$TMP/z2")
+val=$(get_node_use_system_ca_value "$TMP/z2")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): NODE_USE_SYSTEM_CA=0 → replaced with 1"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "export NODE_USE_SYSTEM_CA=off" > "$TMP/z2b"
+ensure_node_use_system_ca_test "$TMP/z2b"
+val=$(get_node_use_system_ca_value "$TMP/z2b")
+RUN=$((RUN + 1))
+[ "$val" = "1" ] && { echo "  OK ($RUN): NODE_USE_SYSTEM_CA=off → replaced with 1"; PASS=$((PASS + 1)); } || { echo "  FAIL ($RUN): expected value 1, got val=$val"; FAIL=$((FAIL + 1)); }
+
+# 3) NODE_USE_SYSTEM_CA exists and value == 1 → do nothing (no duplicate)
+echo "export NODE_USE_SYSTEM_CA=1" > "$TMP/z3"
+ensure_node_use_system_ca_test "$TMP/z3"
+n=$(count_node_use_system_ca_lines "$TMP/z3")
+val=$(get_node_use_system_ca_value "$TMP/z3")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): NODE_USE_SYSTEM_CA=1 → unchanged, no duplicate"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# 3b) value is "1" (quoted) → do nothing
+printf '%s\n' 'export NODE_USE_SYSTEM_CA="1"' > "$TMP/z3b"
+ensure_node_use_system_ca_test "$TMP/z3b"
+n=$(count_node_use_system_ca_lines "$TMP/z3b")
+val=$(get_node_use_system_ca_value "$TMP/z3b")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): NODE_USE_SYSTEM_CA=\"1\" → unchanged, no duplicate"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# Run ensure twice when missing → still only one line (idempotent add)
+echo "something" > "$TMP/z4"
+ensure_node_use_system_ca_test "$TMP/z4"
+ensure_node_use_system_ca_test "$TMP/z4"
+n=$(count_node_use_system_ca_lines "$TMP/z4")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ]; then
+    echo "  OK ($RUN): ensure twice when missing → single line (idempotent)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line after two ensures, got n=$n"
+    FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== UV_NATIVE_TLS ensure logic (add / replace / leave as-is) ==="
+
+ensure_uv_native_tls_test() {
+    local f="$1" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q '^export UV_NATIVE_TLS=' "$f" 2>/dev/null; then
+        echo "export UV_NATIVE_TLS=1" >> "$f"
+    else
+        current=$(grep -E '^export UV_NATIVE_TLS=' "$f" 2>/dev/null | head -1 | sed -E 's/^export UV_NATIVE_TLS=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "1" ]; then
+            replace_export_in_file_test "$f" "UV_NATIVE_TLS" "1"
+        fi
+    fi
+}
+count_uv_native_tls_lines() {
+    grep -c '^export UV_NATIVE_TLS=' "$1" 2>/dev/null || echo 0
+}
+get_uv_native_tls_value() {
+    grep -E '^export UV_NATIVE_TLS=' "$1" 2>/dev/null | head -1 | sed -E 's/^export UV_NATIVE_TLS=//' | sed -E 's/^["'\'']//;s/["'\'']$//'
+}
+
+# 1) UV_NATIVE_TLS does not exist → add "export UV_NATIVE_TLS=1"
+echo "" > "$TMP/u1"
+ensure_uv_native_tls_test "$TMP/u1"
+n=$(count_uv_native_tls_lines "$TMP/u1")
+val=$(get_uv_native_tls_value "$TMP/u1")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): no UV_NATIVE_TLS → add one line with value 1"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2) UV_NATIVE_TLS exists and value != 1 → replace with 1
+echo "export UV_NATIVE_TLS=0" > "$TMP/u2"
+ensure_uv_native_tls_test "$TMP/u2"
+n=$(count_uv_native_tls_lines "$TMP/u2")
+val=$(get_uv_native_tls_value "$TMP/u2")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): UV_NATIVE_TLS=0 → replaced with 1"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "export UV_NATIVE_TLS=off" > "$TMP/u2b"
+ensure_uv_native_tls_test "$TMP/u2b"
+val=$(get_uv_native_tls_value "$TMP/u2b")
+RUN=$((RUN + 1))
+[ "$val" = "1" ] && { echo "  OK ($RUN): UV_NATIVE_TLS=off → replaced with 1"; PASS=$((PASS + 1)); } || { echo "  FAIL ($RUN): expected value 1, got val=$val"; FAIL=$((FAIL + 1)); }
+
+# 3) UV_NATIVE_TLS exists and value == 1 → do nothing (no duplicate)
+echo "export UV_NATIVE_TLS=1" > "$TMP/u3"
+ensure_uv_native_tls_test "$TMP/u3"
+n=$(count_uv_native_tls_lines "$TMP/u3")
+val=$(get_uv_native_tls_value "$TMP/u3")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): UV_NATIVE_TLS=1 → unchanged, no duplicate"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# 3b) value is "1" (quoted) → do nothing
+printf '%s\n' 'export UV_NATIVE_TLS="1"' > "$TMP/u3b"
+ensure_uv_native_tls_test "$TMP/u3b"
+n=$(count_uv_native_tls_lines "$TMP/u3b")
+val=$(get_uv_native_tls_value "$TMP/u3b")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ] && [ "$val" = "1" ]; then
+    echo "  OK ($RUN): UV_NATIVE_TLS=\"1\" → unchanged, no duplicate"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line with value 1, got n=$n val=$val"
+    FAIL=$((FAIL + 1))
+fi
+
+# Run ensure twice when missing → still only one line (idempotent add)
+echo "something" > "$TMP/u4"
+ensure_uv_native_tls_test "$TMP/u4"
+ensure_uv_native_tls_test "$TMP/u4"
+n=$(count_uv_native_tls_lines "$TMP/u4")
+RUN=$((RUN + 1))
+if [ "$n" -eq 1 ]; then
+    echo "  OK ($RUN): ensure twice when missing → single line (idempotent)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected 1 line after two ensures, got n=$n"
+    FAIL=$((FAIL + 1))
+fi
+
+echo ""
 echo "---------------------------------------------------"
 echo "Result: $PASS passed, $FAIL failed (total $RUN)"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1

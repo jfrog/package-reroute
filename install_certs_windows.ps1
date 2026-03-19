@@ -3,7 +3,7 @@
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|pip|all   What to configure: npm, pip (REQUESTS_CA_BUNDLE), or all (default: all)
+#   -Package npm|pip|all   What to configure: npm, pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE), or all (default: all)
 #   -CertName <pattern>    Substring to match cert subject (errors if 0 or >1 match). Requires -ExtractPath. Cannot be used with -UseCert.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each user's profile or absolute. Requires -CertName.
 #   -UseCert <path>        Path to an existing PEM cert file. Cannot be used with -CertName/-ExtractPath.
@@ -285,6 +285,7 @@ function Set-OtherUserEnvVars {
             Set-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -Value $CertPath -Type String -Force
         }
         if ($DoPip) {
+            Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
         }
     } finally {
@@ -384,10 +385,11 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
             [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $certPath, "User")
         }
         if (DoPip) {
+            [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $certPath, "User")
         }
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
-        Write-Host "   + REQUESTS_CA_BUNDLE set to $certPath"
+        Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
     }
     # Only clear the other scope after new User vars are set (above); on failure we exit 1 before reaching here.
     # Extract = per-user cert; clear Machine-level cert vars so only User applies (avoids confusing duplication with old -UseCert).
@@ -396,6 +398,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "Machine")
     }
     if (DoPip) {
+        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
     }
     Write-Host "   + Cleared Machine-level cert vars so only User settings apply."
@@ -412,8 +415,9 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
     }
     if (DoPip) {
+        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", $envScope)
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $UseCert, $envScope)
-        Write-Host "   + REQUESTS_CA_BUNDLE set to $UseCert"
+        Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $UseCert"
     }
     # Only clear the other scope after new vars are set above (so we never leave user with no cert vars on failure).
     # When setting Machine, remove User-level cert vars so they don't override (User wins over Machine on Windows).
@@ -423,6 +427,7 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
             [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "User")
         }
         if (DoPip) {
+            [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
         }
         Write-Host "   + Cleared User-level cert vars so Machine settings apply."

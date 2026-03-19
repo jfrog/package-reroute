@@ -15,6 +15,7 @@ The same environment variables are used on both platforms:
 |----------|--------|---------|
 | `NODE_USE_SYSTEM_CA=1` | Node/npm | Use system CA store in addition to extra certs |
 | `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | Path to PEM file (single file, can contain multiple certs) |
+| `UV_NATIVE_TLS=1` | Python/uv | Use native TLS (system CA + extra certs) |
 | `REQUESTS_CA_BUNDLE=<path>` | Python/requests | Path to PEM bundle for TLS verification |
 
 ---
@@ -84,7 +85,7 @@ sudo ./install_certs_macos.sh \
   --use-cert /opt/certs/company-ca.pem
 ```
 
-**3. Only configure pip (REQUESTS_CA_BUNDLE)**
+**3. Only configure pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE)**
 
 ```bash
 sudo ./install_certs_macos.sh \
@@ -113,7 +114,7 @@ sudo ./install_certs_macos.sh \
 
 | Option | Description |
 |--------|--------------|
-| *(none)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. |
+| *(none)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. UV_NATIVE_TLS is not validated. |
 | `--all-users` | **(Root only.)** For each user in `/Users/*`, read their `~/.zshrc`, resolve cert paths, and validate each PEM. Use: `sudo ./validate_install_macos.sh --all-users`. |
 | `--expected-subject <pattern>` | Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
 
@@ -133,18 +134,18 @@ sudo ./validate_install_macos.sh --expected-subject Zscaler --all-users
 
 ### Testing
 
-Tests live in **scripts/testing/**.
+Tests live in **testing/**.
 
-**test_install_certs_macos.sh** runs automated tests for **install_certs_macos.sh** (CLI and argument validation), **validate_install_macos.sh** (validation with a temp PEM and mock home), and fingerprint/merge logic (same fingerprint → dedupe, different fingerprint → append). No root required.
+**test_install_certs_macos.sh** runs automated tests for **install_certs_macos.sh** (CLI and argument validation), **validate_install_macos.sh** (validation with a temp PEM and mock home), fingerprint/merge logic (same fingerprint → dedupe, different fingerprint → append), and **NODE_USE_SYSTEM_CA** / **UV_NATIVE_TLS** ensure logic (add if missing, replace if value ≠ 1, leave as-is if 1). No root required.
 
 **Requirements:** `openssl` on `PATH` (for generating a temporary cert in tests).
 
 ```bash
 # From repo root
-./scripts/testing/test_install_certs_macos.sh
+./testing/test_install_certs_macos.sh
 
-# Or from scripts/
-cd scripts && ./testing/test_install_certs_macos.sh
+# Or from repo root with testing as current dir
+cd testing && ./test_install_certs_macos.sh
 ```
 
 Exit code 0 if all tests pass, 1 otherwise.
@@ -153,22 +154,19 @@ Exit code 0 if all tests pass, 1 otherwise.
 
 | Area | Covered | Not covered |
 |------|--------|-------------|
-| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`pip` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
+| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`pip` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. **NODE_USE_SYSTEM_CA / UV_NATIVE_TLS ensure logic:** add if missing; replace if value ≠ 1; leave as-is if 1; idempotent (run twice → single line). | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
 | **validate_install_macos.sh** | **CLI:** unknown option (exit 1); missing `--expected-subject` (exit 1). **Main paths:** default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
 
 Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, including admin-required check when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, pip/UV_NATIVE_TLS flow: **-UseCert -Package pip** sets Machine `UV_NATIVE_TLS=1` and `REQUESTS_CA_BUNDLE`; **-Package all** sets all four vars; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
-**Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (i.e. **scripts/**).
+**Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (repo root).
 
 ```powershell
-# From repo root (PowerShell on Windows)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/testing/test_install_certs_windows.ps1
-
-# Or from scripts/
+# From repo root (PowerShell on Windows, as Administrator)
 powershell -NoProfile -ExecutionPolicy Bypass -File testing/test_install_certs_windows.ps1
 ```
 
@@ -178,8 +176,8 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). |
-| **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message). |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Pip / UV_NATIVE_TLS flow:** `-UseCert -Package pip` sets Machine `UV_NATIVE_TLS=1` and `REQUESTS_CA_BUNDLE`; `-UseCert -Package all` sets NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE. |
+| **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message); system-level (Machine) env when run as admin. |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
 
@@ -230,14 +228,13 @@ For each directory in `/Users/*` (skipping `Shared` and non-directories):
 For **npm** (if `--package` is `npm` or `all`):
 
 - Read the first `export NODE_EXTRA_CA_CERTS=...` line (if any) and resolve the path (including `~`).
-- **If no existing export:** append a blank line, `export NODE_USE_SYSTEM_CA=1`, and `export NODE_EXTRA_CA_CERTS="<cert_path>"`.
-- **If export already exists:**  
-  - Replace that line so it points to the **admin’s** cert path (the one we’re configuring).  
-  - Ensure `export NODE_USE_SYSTEM_CA=1` exists (append if missing).  
-  - **Merge PEMs:** read the **old** bundle file (previous path); append every cert from it into the **new** cert file, **except**: (1) certs with the same fingerprint as the one we’re installing, (2) certs already present in the new file (by fingerprint). So the new file ends up with: **our cert first**, then any other CAs from the old file that aren’t duplicates.
+- **If no existing export:** append a blank line, ensure `NODE_USE_SYSTEM_CA=1` (add if missing), and `export NODE_EXTRA_CA_CERTS="<cert_path>"`.
+- **If export already exists:** replace that line so it points to the **admin’s** cert path; ensure `NODE_USE_SYSTEM_CA=1` (add if missing, replace if value ≠ 1, leave if already 1).
+- **Merge PEMs:** read the **old** bundle file (previous path); append every cert from it into the **new** cert file, **except**: (1) certs with the same fingerprint as the one we’re installing, (2) certs already present in the new file (by fingerprint). So the new file ends up with: **our cert first**, then any other CAs from the old file that aren’t duplicates.
 
 For **pip** (if `--package` is `pip` or `all`):
 
+- Ensure `UV_NATIVE_TLS=1`: add if missing, replace if value ≠ 1, leave as-is if already 1.
 - Same idea for `REQUESTS_CA_BUNDLE`: add export if missing, or replace the path and merge the old bundle into the new cert file (again skipping duplicates by fingerprint).
 
 Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
@@ -268,8 +265,8 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 `install_certs_windows.ps1` configures **Node/npm** and/or **Python/pip** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
 - Either **extracts** one certificate from the Windows cert store (LocalMachine\Root) by **subject name pattern**, or **uses an existing** PEM file you provide (**-UseCert**).
-- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user.
-- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
+- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user (npm: `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`; pip: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`).
+- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
 
 Re-runs **merge** certs: if the target file already exists, the script saves its content, overwrites with the new cert, then appends other certs from the saved copy (dedupe by SHA-256 fingerprint). So running with a second cert adds it to the bundle instead of replacing it.
 
@@ -322,8 +319,8 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 - **Admin required.** The script must be run as Administrator (or SYSTEM).
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
-- **Extract path:** per-user **package-route.pem** and User-level env; re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** no PEM written; Machine-level env set; User-level cert vars are **deleted** so only Machine applies.
+- **Extract path:** per-user **package-route.pem** and User-level env (npm: NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS; pip: UV_NATIVE_TLS, REQUESTS_CA_BUNDLE); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
+- **UseCert:** no PEM written; Machine-level env set (same four vars when `-Package all`); User-level cert vars are **deleted** so only Machine applies.
 
 Users must start a **new terminal** for env changes to take effect.
 
