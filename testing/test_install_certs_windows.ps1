@@ -55,9 +55,10 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     # Run a PowerShell script in a child process and return exit code. Captures stderr/stdout.
     # Use -ArgumentList array so paths and params are passed correctly to the child.
     function Invoke-ScriptAndGetExitCode {
-        param([string]$ScriptPath, [array]$Args = @())
-        $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $Args
-        Write-Host "    [run] powershell -NoProfile -ExecutionPolicy Bypass -File '$ScriptPath' $($Args -join ' ')"
+        # Do not name this parameter "Args" — it conflicts with PowerShell's automatic $args and breaks binding on pwsh 7+.
+        param([string]$ScriptPath, [array]$ScriptArguments = @())
+        $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ScriptPath) + $ScriptArguments
+        Write-Host "    [run] powershell -NoProfile -ExecutionPolicy Bypass -File '$ScriptPath' $($ScriptArguments -join ' ')"
         $stdoutFile = Join-Path $TempDir "out_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
         $stderrFile = Join-Path $TempDir "err_$([Guid]::NewGuid().ToString('N').Substring(0,4)).txt"
         Write-Host "    [Start-Process] powershell.exe -ArgumentList: $($allArgs -join ' ')"
@@ -69,9 +70,9 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     }
 
     function Assert-ExitCode {
-        param([int]$Expected, [string]$ScriptPath, [array]$Args = @())
+        param([int]$Expected, [string]$ScriptPath, [array]$ScriptArguments = @())
         $script:Run++
-        $r = Invoke-ScriptAndGetExitCode -ScriptPath $ScriptPath -Args $Args
+        $r = Invoke-ScriptAndGetExitCode -ScriptPath $ScriptPath -ScriptArguments $ScriptArguments
         $got = $r.ExitCode
          Write-Host "    ExitCode: $got | Stdout: <$($r.Stdout)> | Stderr: <$($r.Stderr)>"
         if ($got -eq $Expected) {
@@ -84,9 +85,9 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     }
 
     function Assert-Stderr {
-        param([string]$Pattern, [string]$ScriptPath, [array]$Args = @())
+        param([string]$Pattern, [string]$ScriptPath, [array]$ScriptArguments = @())
         $script:Run++
-        $r = Invoke-ScriptAndGetExitCode -ScriptPath $ScriptPath -Args $Args
+        $r = Invoke-ScriptAndGetExitCode -ScriptPath $ScriptPath -ScriptArguments $ScriptArguments
         $combined = $r.Stdout + " " + $r.Stderr
         if ($combined -match $Pattern) {
             Write-Host "  OK ($Run): output matches /$Pattern/"
@@ -108,36 +109,36 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     Write-Host "=== install_certs_windows.ps1 CLI tests ==="
 
     # No cert source (only -Package; no parameter set selected)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-Package", "all")
-    Assert-Stderr -Pattern "Parameter set|cannot be resolved|ExtractPath|UseCert" -ScriptPath $InstallScript -Args @("-Package", "all")
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
+    Assert-Stderr -Pattern "Parameter set|cannot be resolved|ExtractPath|UseCert" -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
 
     # Invalid -Package
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-Package", "foo")
-    Assert-Stderr -Pattern "ValidateSet|npm|pip|all" -ScriptPath $InstallScript -Args @("-Package", "foo")
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
+    Assert-Stderr -Pattern "ValidateSet|npm|pip|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
 
     # -CertName without -ExtractPath (PowerShell requires both in set)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-CertName", "X")
-    Assert-Stderr -Pattern "ExtractPath|Missing|argument for parameter|ParameterSet|required" -ScriptPath $InstallScript -Args @("-CertName", "X")
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
+    Assert-Stderr -Pattern "ExtractPath|Missing|argument for parameter|ParameterSet|required" -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
 
     # -ExtractPath without -CertName
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-ExtractPath", "C:\temp")
-    Assert-Stderr -Pattern "CertName|Missing|Parameter set" -ScriptPath $InstallScript -Args @("-ExtractPath", "C:\temp")
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
+    Assert-Stderr -Pattern "CertName|Missing|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
 
     # -UseCert and -CertName together
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-CertName", "X")
-    Assert-Stderr -Pattern "cannot be used together|Parameter set" -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-CertName", "X")
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
+    Assert-Stderr -Pattern "cannot be used together|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
 
     # -UseCert with nonexistent file
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-UseCert", $Nonexistent)
-    Assert-Stderr -Pattern "not a file|UseCert|Error" -ScriptPath $InstallScript -Args @("-UseCert", $Nonexistent)
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $Nonexistent)
+    Assert-Stderr -Pattern "not a file|UseCert|Error" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $Nonexistent)
 
     # -UseCert with invalid PEM (file exists but not valid)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -Args @("-UseCert", $InvalidPath)
-    Assert-Stderr -Pattern "Invalid or missing PEM|Error" -ScriptPath $InstallScript -Args @("-UseCert", $InvalidPath)
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $InvalidPath)
+    Assert-Stderr -Pattern "Invalid or missing PEM|Error" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $InvalidPath)
 
     # -UseCert with valid PEM: may succeed (sets env) or fail; we only check it doesn't error with "not a file" or "Invalid PEM"
     $Run++
-    $r = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -Args @("-UseCert", $CertPath)
+    $r = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath)
     if (-not (($r.Stdout + $r.Stderr) -match "not a file|Invalid or missing PEM")) {
         Write-Host "  OK ($Run): -UseCert with valid PEM (exit $($r.ExitCode))"
         $script:Pass++
@@ -153,7 +154,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     try {
-        $rPip = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-Package", "pip")
+        $rPip = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "pip")
         $Run++
         if ($rPip.ExitCode -ne 0) {
             Write-Host "  FAIL ($Run): -UseCert -Package pip expected exit 0, got $($rPip.ExitCode)"
@@ -178,7 +179,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     $savedNode = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
     $savedNodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
     try {
-        $rAll = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -Args @("-UseCert", $CertPath, "-Package", "all")
+        $rAll = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "all")
         $Run++
         if ($rAll.ExitCode -ne 0) {
             Write-Host "  FAIL ($Run): -UseCert -Package all expected exit 0, got $($rAll.ExitCode)"
@@ -207,8 +208,8 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     Write-Host "=== validate_install_windows.ps1 tests ==="
 
     # -ExpectedSubject is required
-    Assert-ExitCode -Expected 1 -ScriptPath $ValidateScript -Args @()
-    Assert-Stderr -Pattern "ExpectedSubject is required" -ScriptPath $ValidateScript -Args @()
+    Assert-ExitCode -Expected 1 -ScriptPath $ValidateScript -ScriptArguments @()
+    Assert-Stderr -Pattern "ExpectedSubject is required" -ScriptPath $ValidateScript -ScriptArguments @()
 
     # Helper: set User NODE_EXTRA_CA_CERTS before child, run validate in child, clear after.
     function Invoke-ValidateWithEnvPath {
