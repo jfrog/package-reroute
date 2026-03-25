@@ -1,5 +1,7 @@
 # Certificate installation scripts
 
+Scripts to install a CA certificate and configure Node/npm and Python/pip.
+
 This document describes the certificate installation and validation scripts for **macOS** and **Windows**.
 
 | Script | Platform | Purpose |
