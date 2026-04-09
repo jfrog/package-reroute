@@ -1,24 +1,27 @@
 # Certificate installation scripts
 
-Scripts to install a CA certificate and configure Node/npm and Python/pip.
+Scripts to install a CA certificate and configure Node/npm and Python/pip (and related TLS clients).
 
-This document describes the certificate installation and validation scripts for **macOS** and **Windows**.
+This document describes the certificate installation and validation scripts for **macOS**, **Linux (Debian/Ubuntu)**, and **Windows**.
 
 | Script | Platform | Purpose |
 |--------|----------|---------|
 | **install_certs_macos.sh** | macOS | Install cert and set env vars (Node/Python) |
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
+| **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc |
+| **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
 | **install_certs_windows.ps1** | Windows | Install cert and set env vars (Node/Python) |
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 
-The same environment variables are used on both platforms:
+Environment variables by platform (see each section for details):
 
-| Variable | Used by | Purpose |
-|----------|--------|---------|
-| `NODE_USE_SYSTEM_CA=1` | Node/npm | Use system CA store in addition to extra certs |
-| `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | Path to PEM file (single file, can contain multiple certs) |
-| `UV_NATIVE_TLS=1` | Python/uv | Use native TLS (system CA + extra certs) |
-| `REQUESTS_CA_BUNDLE=<path>` | Python/requests | Path to PEM bundle for TLS verification |
+| Variable | Typical use | Notes |
+|----------|-------------|--------|
+| `NODE_USE_SYSTEM_CA=1` | Node/npm | macOS, Debian, Windows when npm is configured |
+| `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | PEM path (bundle allowed) |
+| `UV_NATIVE_TLS=1` | Python **uv** | macOS and Windows **pip** flows; **not** set by the Debian/Ubuntu script |
+| `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
+| `SSL_CERT_FILE=<path>` | OpenSSL-backed tools | Set on **Debian/Ubuntu** (pip flow) to the system CA bundle |
 
 ---
 
@@ -32,7 +35,7 @@ The same environment variables are used on both platforms:
 - Either **extracts** one certificate from the macOS Keychain (by name pattern) and writes it to a PEM file, or **uses an existing** PEM file you provide.
 - For **each user** in `/Users/*`, writes or updates the certificate file and sets environment variables in that user’s `~/.zshrc` so Node and Python use the certificate.
 
-The PEM file written is named **package-route.pem** under the directory you choose.
+With **Keychain extraction**, each user gets **package-route.pem** under `~/<extract-path>/`. With **`--use-cert`**, the install uses your PEM path as-is for every user.
 
 ### Requirements
 
@@ -57,7 +60,7 @@ sudo ./install_certs_macos.sh [OPTIONS]
 |--------|----------|-------------|
 | `--package <npm\|pip\|all>` | No (default: **all**) | What to configure: **npm** (Node), **pip** (Python/requests), or **all**. |
 | `--cert-name <pattern>` | Yes* | Regex pattern to match **exactly one** certificate in the Keychain (subject). Requires `--extract-path`. |
-| `--extract-path <path>` | Yes* | Directory where **package-route.pem** will be written. Absolute or relative to each user’s home. Requires `--cert-name`. |
+| `--extract-path <path>` | Yes* | Directory **under each user’s home** where **package-route.pem** is written: `~/<path with leading / stripped>/package-route.pem` (e.g. `opt/certs` → `~/opt/certs/...`, `certs` → `~/certs/...`). Requires `--cert-name`. |
 | `--use-cert <path>` | Yes* | Use this existing PEM file instead of extracting from Keychain. Cannot be used with `--cert-name` / `--extract-path`. |
 | `--install-dependencies` | No | If **openssl** is missing, install it via Homebrew and continue in the same run. |
 | `-h`, `--help` | — | Print usage and exit. |
@@ -112,13 +115,13 @@ sudo ./install_certs_macos.sh \
 
 ### Install validation
 
-**validate_install_macos.sh** checks that the certificate installation succeeded: PEM file(s) exist and are valid (via `openssl x509`). It does **not** require root unless you use `--all-users`.
+**validate_install_macos.sh** checks that the certificate installation succeeded: PEM file(s) exist and are valid (via `openssl x509`). **`--expected-subject` is required** for every invocation. It does **not** require root unless you use `--all-users`.
 
 | Option | Description |
 |--------|--------------|
-| *(none)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. UV_NATIVE_TLS is not validated. |
-| `--all-users` | **(Root only.)** For each user in `/Users/*`, read their `~/.zshrc`, resolve cert paths, and validate each PEM. Use: `sudo ./validate_install_macos.sh --all-users`. |
-| `--expected-subject <pattern>` | Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
+| `--expected-subject <pattern>` | **Required.** At least one cert in each PEM file (bundle) must have a subject matching `<pattern>` (case-insensitive). |
+| *(default scope)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. `UV_NATIVE_TLS` is not validated. |
+| `--all-users` | **(Root only.)** For each user in `/Users/*`, read their `~/.zshrc`, resolve cert paths, and validate each PEM. Use: `sudo ./validate_install_macos.sh --expected-subject <pattern> --all-users`. |
 
 **Requirements:** `openssl` on `PATH` (same paths as the install script are prepended).
 
@@ -136,7 +139,7 @@ sudo ./validate_install_macos.sh --expected-subject Zscaler --all-users
 
 ### Testing
 
-Tests live in **testing/**.
+Tests live in **testing/**. Automated tests cover **macOS** and **Windows** only (not Debian/Ubuntu).
 
 **test_install_certs_macos.sh** runs automated tests for **install_certs_macos.sh** (CLI and argument validation), **validate_install_macos.sh** (validation with a temp PEM and mock home), fingerprint/merge logic (same fingerprint → dedupe, different fingerprint → append), and **NODE_USE_SYSTEM_CA** / **UV_NATIVE_TLS** ensure logic (add if missing, replace if value ≠ 1, leave as-is if 1). No root required.
 
@@ -253,10 +256,53 @@ Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 
 - **One run as root** (optionally with `--install-dependencies` to install openssl).
 - **One cert source:** either Keychain (--cert-name + --extract-path) or existing file (--use-cert).
-- **Per user:** one PEM path per user (or shared if extract-path is absolute); env vars in `~/.zshrc` point to that path.
+- **Per user:** PEM at `~/<extract-path>/package-route.pem` for each user (leading `/` on `--extract-path` is stripped); env vars in `~/.zshrc` point to that path. With `--use-cert`, the same PEM path is used for every user.
 - **If user already had a different path:** script replaces it with the admin’s path and merges other certs from the old file into the new one (no duplicate certs by fingerprint).
 
 Users must open a **new terminal** (or `source ~/.zshrc`) for the new environment variables to take effect.
+
+---
+
+## Linux (Debian/Ubuntu): install_certs_debian_ubuntu.sh
+
+### Overview
+
+`install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the **invoking non-root user’s** shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
+
+- **npm:** `NODE_USE_SYSTEM_CA=1` and `NODE_EXTRA_CA_CERTS` pointing at the **installed** cert under `/usr/local/share/ca-certificates/` (default basename `package-route-custom-ca.crt`, overridable with `--cert-name`).
+- **pip / Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows pip flows).
+
+### Requirements
+
+- **Debian or Ubuntu** (script checks `/etc/os-release`).
+- **Root** (`sudo`).
+- **`openssl`** and **`update-ca-certificates`** on `PATH`.
+
+### Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT file. |
+| `--package npm\|pip\|all` | No (default: **all**) | What to configure. |
+| `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for the file installed under `/usr/local/share/ca-certificates/<name>.crt` (not a Keychain/subject pattern). |
+| `-h`, `--help` | — | Usage. |
+
+### Examples
+
+```bash
+sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem
+sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package npm
+sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --cert-name my-org-ca
+```
+
+### Validation: validate_certs_debian_ubuntu.sh
+
+**`--expected-subject` is required.** Checks PEM paths from the current user’s `~/.bashrc` / `~/.zshrc` and, when present, **`/etc/profile.d/package-route-certs.sh`** (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`). With **`--all-users`** (root only), validates `/home/*` users’ rc files.
+
+```bash
+./validate_certs_debian_ubuntu.sh --expected-subject "O=Example"
+sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example"
+```
 
 ---
 
@@ -266,7 +312,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 `install_certs_windows.ps1` configures **Node/npm** and/or **Python/pip** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
-- Either **extracts** one certificate from the Windows cert store (LocalMachine\Root) by **subject name pattern**, or **uses an existing** PEM file you provide (**-UseCert**).
+- Either **extracts** a certificate from the Windows cert store (LocalMachine\Root) by **subject substring** (`-CertName`), or **uses an existing** PEM file you provide (**-UseCert**). If **multiple** certs match the pattern, the script logs a warning and picks one (prefers a subject containing `Root`, otherwise the first match).
 - With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user (npm: `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`; pip: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`).
 - With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
 
@@ -276,7 +322,7 @@ Re-runs **merge** certs: if the target file already exists, the script saves its
 
 - **Windows** with PowerShell.
 - **Run as Administrator** (or SYSTEM). The script checks and exits with an error if not elevated.
-- When using **-CertName:** the certificate must exist in LocalMachine\Root and match **exactly one** cert by subject substring.
+- When using **-CertName:** at least one certificate in LocalMachine\Root must match; if several match, the script warns and selects one (see Overview).
 
 ### How to use
 
@@ -291,8 +337,8 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `-Package` | No (default: **all**) | `npm`, `pip`, or `all`. |
-| `-CertName` | Yes* | Substring to match **exactly one** cert subject in the store. Requires `-ExtractPath`. Cannot be used with `-UseCert`. |
-| `-ExtractPath` | Yes* | Directory for the PEM (writes `<path>\package-route.pem`); relative to each user’s profile or absolute. Requires `-CertName`. |
+| `-CertName` | Yes* | Substring used to match cert **Subject** in the store (`*CertName*` wildcard). Requires `-ExtractPath`. Cannot be used with `-UseCert`. |
+| `-ExtractPath` | Yes* | Directory under each user’s profile for **package-route.pem** (rooted paths are normalized to a folder under the profile, same idea as macOS). Requires `-CertName`. |
 | `-UseCert` | Yes* | Path to an existing PEM file. Cannot be used with `-CertName` / `-ExtractPath`. |
 
 \* Use **either** (`-CertName` and `-ExtractPath`) **or** `-UseCert`.
@@ -330,13 +376,13 @@ Users must start a **new terminal** for env changes to take effect.
 
 ### Windows: validate_install_windows.ps1
 
-**validate_install_windows.ps1** checks that the certificate installation is valid: PEM file(s) exist and are valid (same validation as the install script). **-ExpectedSubject is required.** It does **not** require admin unless you use `-AllUsers`.
+**validate_install_windows.ps1** checks that the certificate installation is valid: PEM file(s) exist and are valid (same validation as the install script). **`-ExpectedSubject` is required** for every invocation. It does **not** require admin unless you use `-AllUsers`.
 
 | Parameter | Description |
 |-----------|-------------|
-| `-ExpectedSubject <pattern>` | **Required.** Require at least one cert in each PEM file (bundle) to have a subject matching `<pattern>` (case-insensitive). All certs in the file are checked. |
+| `-ExpectedSubject <pattern>` | **Required.** At least one cert in each PEM file (bundle) must have a subject matching `<pattern>` (case-insensitive). |
+| *(default scope)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user's environment (User then Machine), then validate each referenced PEM file. |
 | `-AllUsers` | **(Admin only.)** For each user in `C:\Users\*`, read their User registry env, resolve cert paths, and validate each PEM. |
-| *(no path param)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user's environment (User then Machine), then validate each referenced PEM file. |
 
 **Exit code:** 0 if all checks passed, 1 if any check failed.
 
@@ -347,3 +393,16 @@ Users must start a **new terminal** for env changes to take effect.
 # Validate every user's config (run as Administrator)
 .\validate_install_windows.ps1 -ExpectedSubject Zscaler -AllUsers
 ```
+
+---
+
+## Continuous integration
+
+On **push** and **pull request** to `main` or `master`, GitHub Actions runs:
+
+| Job | Runner | Command |
+|-----|--------|---------|
+| Test (macOS) | `macos-latest` | `sudo ./testing/test_install_certs_macos.sh` |
+| Test (Windows) | `windows-latest` | `./testing/test_install_certs_windows.ps1` (PowerShell) |
+
+There is no CI job for the Debian/Ubuntu scripts in this workflow.
