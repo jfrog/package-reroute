@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# (c) JFrog Ltd. (2026)
 # Tests for install_certs_macos.sh (CLI and arg validation) and validate_install_macos.sh.
 # Run from repo root: ./scripts/testing/test_install_certs_macos.sh  or from scripts/: ./testing/test_install_certs_macos.sh
 # No root required; uses a temp dir and a self-signed PEM. Run after changes to install or validate scripts; see scripts/README.md for coverage.

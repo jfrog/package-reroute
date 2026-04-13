@@ -1,3 +1,4 @@
+# (c) JFrog Ltd. (2026)
 # Tests for install_certs_windows.ps1 (CLI and parameter validation) and validate_install_windows.ps1.
 # Run from repo root: powershell -ExecutionPolicy Bypass -File scripts/testing/test_install_certs_windows.ps1
 # Or from scripts/: powershell -ExecutionPolicy Bypass -File testing/test_install_certs_windows.ps1

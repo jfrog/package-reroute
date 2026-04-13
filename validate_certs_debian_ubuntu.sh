@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# (c) JFrog Ltd. (2026)
 # Validate certificate installation after install_certs_debian_ubuntu.sh:
 # PEM file(s) exist and are valid; require subject match on each checked path.
 # Also checks /etc/profile.d/package-route-certs.sh when present.

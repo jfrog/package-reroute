@@ -1,4 +1,5 @@
 <svg viewBox="0 0 900 1250" xmlns="http://www.w3.org/2000/svg">
+  <!-- (c) JFrog Ltd. (2026) -->
   <rect width="900" height="1250" fill="#ffffff" />
   <style>
     .box { fill: #f8f9fa; stroke: #333; stroke-width: 2; }

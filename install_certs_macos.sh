@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# (c) JFrog Ltd. (2026)
 # Auto-Extract certificate from keychain and configure Node/npm and/or pip for macOS
 # Run: bash install_certs_macos.sh [OPTIONS]
 #

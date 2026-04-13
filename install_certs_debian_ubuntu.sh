@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# (c) JFrog Ltd. (2026)
 # Install a custom CA certificate on Debian/Ubuntu and configure npm and/or pip
 # via environment variables.
 #
