@@ -27,7 +27,8 @@ Options:
   --all-users                      Validate /home/* users' ~/.bashrc and ~/.zshrc (requires root).
   -h, --help                       Show this help
 
-Also validates $PROFILED_FILE when it exists (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE).
+Also validates $PROFILED_FILE when it exists: path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE,
+SSL_CERT_FILE, CARGO_HTTP_CAINFO, CURL_CA_BUNDLE) and, if present, UV_NATIVE_TLS / UV_SYSTEM_CERTS (=true).
 EOF
 }
 
@@ -98,13 +99,20 @@ validate_pem() {
     return 0
 }
 
-get_export_path() {
-    local f="$1" var="$2" expand_home="${3:-}"
-    local line path
+get_export_value() {
+    local f="$1" var="$2"
+    local line val
     [[ ! -f "$f" ]] && echo "" && return 0
     line=$(grep -E "^export ${var}=" "$f" 2>/dev/null | head -1) || true
     [[ -z "$line" ]] && echo "" && return 0
-    path=$(echo "$line" | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+    val=$(echo "$line" | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+    echo "$val"
+}
+
+get_export_path() {
+    local f="$1" var="$2" expand_home="${3:-}"
+    local path
+    path="$(get_export_value "$f" "$var")"
     if [[ -n "$expand_home" && "$path" == "~"* ]]; then
         path="${expand_home}${path#\~}"
     fi
@@ -124,6 +132,22 @@ validate_path_deduped() {
     fi
 }
 
+# If install script wrote UV_* exports, they must be "true" (matches install_certs_debian_ubuntu.sh).
+validate_uv_if_present() {
+    local f="$1"
+    local var val
+    [[ ! -f "$f" ]] && return 0
+    for var in UV_NATIVE_TLS UV_SYSTEM_CERTS; do
+        if grep -qE "^export ${var}=" "$f" 2>/dev/null; then
+            val="$(get_export_value "$f" "$var")"
+            if [[ "$val" != "true" ]]; then
+                echo "  FAIL: $f has ${var}=${val:-<empty>} (expected true)"
+                FAIL=$((FAIL + 1))
+            fi
+        fi
+    done
+}
+
 validate_from_rc_files() {
     local label="$1" home="$2"
     shift 2
@@ -137,6 +161,9 @@ validate_from_rc_files() {
         validate_path_deduped "$(get_export_path "$rc" "NODE_EXTRA_CA_CERTS" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "REQUESTS_CA_BUNDLE" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "SSL_CERT_FILE" "$home")"
+        validate_path_deduped "$(get_export_path "$rc" "CARGO_HTTP_CAINFO" "$home")"
+        validate_path_deduped "$(get_export_path "$rc" "CURL_CA_BUNDLE" "$home")"
+        validate_uv_if_present "$rc"
     done
 
     if [[ $any -eq 0 ]]; then
@@ -145,7 +172,7 @@ validate_from_rc_files() {
     fi
 
     if [[ "$DEDUPE" == "|" ]]; then
-        echo "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE in rc files for $label"
+        echo "  WARN: no CA path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CARGO_HTTP_CAINFO, CURL_CA_BUNDLE) in rc files for $label"
     fi
 }
 
@@ -160,9 +187,12 @@ validate_profiled() {
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "NODE_EXTRA_CA_CERTS" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "REQUESTS_CA_BUNDLE" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "SSL_CERT_FILE" "")"
+    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "CARGO_HTTP_CAINFO" "")"
+    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "CURL_CA_BUNDLE" "")"
+    validate_uv_if_present "$PROFILED_FILE"
 
     if [[ "$DEDUPE" == "|" ]]; then
-        echo "  WARN: no expected exports in $PROFILED_FILE"
+        echo "  WARN: no CA path exports in $PROFILED_FILE"
     fi
 }
 
