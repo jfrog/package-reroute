@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Install a custom CA certificate on Debian/Ubuntu and configure npm and/or pip
-# via environment variables.
+# Install a custom CA certificate on Debian/Ubuntu and configure package-manager
+# related environment variables for redirected package traffic.
 #
 # Run:
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|pip|all]
@@ -22,8 +22,8 @@
 # Notes:
 #   - Debian/Ubuntu only
 #   - Must run as root
-#   - npm uses the single installed custom cert
-#   - pip uses the full system CA bundle
+#   - On Debian/Ubuntu, the system CA bundle becomes the combined bundle once the
+#     custom CA is installed via update-ca-certificates
 #   - New terminals should pick up the env vars automatically
 
 set -euo pipefail
@@ -172,28 +172,33 @@ install_system_cert() {
     fi
 
     echo "      Installed custom CA at: $system_cert_path"
-    echo "      System CA bundle is:    $SYSTEM_CA_BUNDLE"
+    echo "      Combined system CA bundle: $SYSTEM_CA_BUNDLE"
 }
 
 write_profiled() {
-    local system_cert_path="$1"
-
     echo "[2/4] Writing managed environment file to $PROFILED_FILE..."
 
     {
         echo "# Managed by install_certs_debian_ubuntu.sh"
-        echo "# Package manager CA configuration"
+        echo "# Package manager CA configuration for redirected package traffic"
+        echo "# On Debian/Ubuntu, once the custom CA is installed via"
+        echo "# update-ca-certificates, the system CA bundle is already the"
+        echo "# combined bundle (public roots + corporate CA)."
         echo
 
         if do_npm; then
             echo "export NODE_USE_SYSTEM_CA=1"
-            echo "export NODE_EXTRA_CA_CERTS=\"$system_cert_path\""
+            echo "export NODE_EXTRA_CA_CERTS=\"$SYSTEM_CA_BUNDLE\""
             echo
         fi
 
         if do_pip; then
             echo "export REQUESTS_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
+            echo "export UV_NATIVE_TLS=true"
+            echo "export UV_SYSTEM_CERTS=true"
+            echo "export CARGO_HTTP_CAINFO=\"$SYSTEM_CA_BUNDLE\""
+            echo "export CURL_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo
         fi
     } > "$PROFILED_FILE"
@@ -210,7 +215,7 @@ replace_export_in_file() {
     escaped="${value//\\/\\\\}"
     escaped="${escaped//\"/\\\"}"
 
-    tmp=$(mktemp)
+    tmp="$(mktemp)"
     awk -v var="$var" -v val="$escaped" '
         $0 ~ "^export " var "=" {
             print "export " var "=\"" val "\""
@@ -254,7 +259,6 @@ get_user_shell() {
 }
 
 update_user_shell_rc() {
-    local system_cert_path="$1"
     local target_user user_home user_shell rc_file
 
     target_user="$(get_target_user)"
@@ -283,12 +287,16 @@ update_user_shell_rc() {
 
     if do_npm; then
         ensure_export_in_file "$rc_file" "NODE_USE_SYSTEM_CA" "1"
-        ensure_export_in_file "$rc_file" "NODE_EXTRA_CA_CERTS" "$system_cert_path"
+        ensure_export_in_file "$rc_file" "NODE_EXTRA_CA_CERTS" "$SYSTEM_CA_BUNDLE"
     fi
 
     if do_pip; then
         ensure_export_in_file "$rc_file" "REQUESTS_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "UV_NATIVE_TLS" "true"
+        ensure_export_in_file "$rc_file" "UV_SYSTEM_CERTS" "true"
+        ensure_export_in_file "$rc_file" "CARGO_HTTP_CAINFO" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "CURL_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
     fi
 
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true
@@ -310,18 +318,25 @@ print_done() {
     echo "Installed certificate:"
     echo "  $system_cert_path"
     echo
+    echo "Combined system CA bundle:"
+    echo "  $SYSTEM_CA_BUNDLE"
+    echo
 
     if do_npm; then
-        echo "npm environment:"
+        echo "npm/node environment:"
         echo "  NODE_USE_SYSTEM_CA=1"
-        echo "  NODE_EXTRA_CA_CERTS=$system_cert_path"
+        echo "  NODE_EXTRA_CA_CERTS=$SYSTEM_CA_BUNDLE"
         echo
     fi
 
     if do_pip; then
-        echo "pip/python environment:"
+        echo "python/tooling environment:"
         echo "  REQUESTS_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
+        echo "  UV_NATIVE_TLS=true"
+        echo "  UV_SYSTEM_CERTS=true"
+        echo "  CARGO_HTTP_CAINFO=$SYSTEM_CA_BUNDLE"
+        echo "  CURL_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo
     fi
 
@@ -331,10 +346,11 @@ print_done() {
     echo
     echo "Open a $rc_hint and validate:"
     if do_npm; then
-        echo "  env | grep NODE_EXTRA_CA_CERTS"
+        echo "  env | grep -E 'NODE_USE_SYSTEM_CA|NODE_EXTRA_CA_CERTS'"
         echo "  npm i axios"
     fi
     if do_pip; then
+        echo "  env | grep -E 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|UV_NATIVE_TLS|UV_SYSTEM_CERTS|CARGO_HTTP_CAINFO|CURL_CA_BUNDLE'"
         echo "  python3 -m venv .venv"
         echo "  source .venv/bin/activate"
         echo "  pip install requests"
@@ -353,8 +369,8 @@ main() {
     system_cert_path="${SYSTEM_CERT_DIR}/${CERT_BASENAME}.crt"
 
     install_system_cert "$system_cert_path"
-    write_profiled "$system_cert_path"
-    update_user_shell_rc "$system_cert_path"
+    write_profiled
+    update_user_shell_rc
     print_done "$system_cert_path"
 }
 
