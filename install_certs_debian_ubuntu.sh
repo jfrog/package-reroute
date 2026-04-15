@@ -4,12 +4,12 @@
 # related environment variables for redirected package traffic.
 #
 # Run:
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|pip|all]
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|python|all]
 #
 # Examples:
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package npm
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package pip
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package python
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
 #
 # What it does:
@@ -39,29 +39,29 @@ SYSTEM_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-cert <path> [--package npm|pip|all] [--cert-name <name>]
+  sudo $0 --use-cert <path> [--package npm|python|all] [--cert-name <name>]
 
 Options:
   --use-cert <path>       Path to an existing PEM/CRT certificate file
-  --package npm|pip|all   Configure npm, pip, or both (default: all)
+  --package npm|python|all   Configure npm, Python tooling, or both (default: all)
   --cert-name <name>      Base name for installed cert (default: ${CERT_BASENAME})
   -h, --help              Show this help
 
 Examples:
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package npm
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package pip
+  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package python
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
 EOF
 }
 
 do_npm() { [[ "$PACKAGE" == "npm" || "$PACKAGE" == "all" ]]; }
-do_pip() { [[ "$PACKAGE" == "pip" || "$PACKAGE" == "all" ]]; }
+do_python() { [[ "$PACKAGE" == "python" || "$PACKAGE" == "all" ]]; }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-cert <path> [--package npm|pip|all]" >&2
+        echo "Use: sudo $0 --use-cert <path> [--package npm|python|all]" >&2
         exit 1
     fi
 }
@@ -94,9 +94,9 @@ parse_args() {
     done
 
     case "$PACKAGE" in
-        npm|pip|all) ;;
+        npm|python|all) ;;
         *)
-            echo "Error: --package must be npm, pip, or all (got: $PACKAGE)." >&2
+            echo "Error: --package must be npm, python, or all (got: $PACKAGE)." >&2
             exit 1
             ;;
     esac
@@ -192,13 +192,11 @@ write_profiled() {
             echo
         fi
 
-        if do_pip; then
+        if do_python; then
             echo "export REQUESTS_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
             echo "export UV_NATIVE_TLS=true"
             echo "export UV_SYSTEM_CERTS=true"
-            echo "export CARGO_HTTP_CAINFO=\"$SYSTEM_CA_BUNDLE\""
-            echo "export CURL_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo
         fi
     } > "$PROFILED_FILE"
@@ -290,13 +288,11 @@ update_user_shell_rc() {
         ensure_export_in_file "$rc_file" "NODE_EXTRA_CA_CERTS" "$SYSTEM_CA_BUNDLE"
     fi
 
-    if do_pip; then
+    if do_python; then
         ensure_export_in_file "$rc_file" "REQUESTS_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "UV_NATIVE_TLS" "true"
         ensure_export_in_file "$rc_file" "UV_SYSTEM_CERTS" "true"
-        ensure_export_in_file "$rc_file" "CARGO_HTTP_CAINFO" "$SYSTEM_CA_BUNDLE"
-        ensure_export_in_file "$rc_file" "CURL_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
     fi
 
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true
@@ -329,14 +325,12 @@ print_done() {
         echo
     fi
 
-    if do_pip; then
+    if do_python; then
         echo "python/tooling environment:"
         echo "  REQUESTS_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
         echo "  UV_NATIVE_TLS=true"
         echo "  UV_SYSTEM_CERTS=true"
-        echo "  CARGO_HTTP_CAINFO=$SYSTEM_CA_BUNDLE"
-        echo "  CURL_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo
     fi
 
@@ -349,11 +343,11 @@ print_done() {
         echo "  env | grep -E 'NODE_USE_SYSTEM_CA|NODE_EXTRA_CA_CERTS'"
         echo "  npm i axios"
     fi
-    if do_pip; then
-        echo "  env | grep -E 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|UV_NATIVE_TLS|UV_SYSTEM_CERTS|CARGO_HTTP_CAINFO|CURL_CA_BUNDLE'"
+    if do_python; then
+        echo "  env | grep -E 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|UV_NATIVE_TLS|UV_SYSTEM_CERTS'"
         echo "  python3 -m venv .venv"
         echo "  source .venv/bin/activate"
-        echo "  pip install requests"
+        echo "  python -m pip install requests"
     fi
 }
 

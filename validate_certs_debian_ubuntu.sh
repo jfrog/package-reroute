@@ -28,7 +28,7 @@ Options:
   -h, --help                       Show this help
 
 Also validates $PROFILED_FILE when it exists: path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE,
-SSL_CERT_FILE, CARGO_HTTP_CAINFO, CURL_CA_BUNDLE) and, if present, UV_NATIVE_TLS / UV_SYSTEM_CERTS (=true).
+SSL_CERT_FILE) and, if present, UV_NATIVE_TLS / UV_SYSTEM_CERTS (=true).
 EOF
 }
 
@@ -161,8 +161,6 @@ validate_from_rc_files() {
         validate_path_deduped "$(get_export_path "$rc" "NODE_EXTRA_CA_CERTS" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "REQUESTS_CA_BUNDLE" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "SSL_CERT_FILE" "$home")"
-        validate_path_deduped "$(get_export_path "$rc" "CARGO_HTTP_CAINFO" "$home")"
-        validate_path_deduped "$(get_export_path "$rc" "CURL_CA_BUNDLE" "$home")"
         validate_uv_if_present "$rc"
     done
 
@@ -172,7 +170,7 @@ validate_from_rc_files() {
     fi
 
     if [[ "$DEDUPE" == "|" ]]; then
-        echo "  WARN: no CA path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CARGO_HTTP_CAINFO, CURL_CA_BUNDLE) in rc files for $label"
+        echo "  WARN: no CA path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE) in rc files for $label"
     fi
 }
 
@@ -187,8 +185,6 @@ validate_profiled() {
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "NODE_EXTRA_CA_CERTS" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "REQUESTS_CA_BUNDLE" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "SSL_CERT_FILE" "")"
-    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "CARGO_HTTP_CAINFO" "")"
-    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "CURL_CA_BUNDLE" "")"
     validate_uv_if_present "$PROFILED_FILE"
 
     if [[ "$DEDUPE" == "|" ]]; then
