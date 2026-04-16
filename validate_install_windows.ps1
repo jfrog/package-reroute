@@ -1,5 +1,7 @@
 # (c) JFrog Ltd. (2026)
 # Validate certificate installation: PEM file(s) exist and are valid; require subject match.
+# Checks NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE (User then Machine) and, when set,
+# UV_NATIVE_TLS / UV_SYSTEM_CERTS (must be "true", matching install_certs_windows.ps1).
 # See README for usage. -ExpectedSubject is required. Exit 0 = all checks passed.
 
 param(
@@ -89,12 +91,44 @@ function Validate-Pem {
     return $true
 }
 
+function Get-EffectiveEnvValue {
+    param([string]$Name)
+    $val = [Environment]::GetEnvironmentVariable($Name, "User")
+    if ([string]::IsNullOrWhiteSpace($val)) { $val = [Environment]::GetEnvironmentVariable($Name, "Machine") }
+    return $val
+}
+
+# If install script wrote UV_* they must be "true" (matches install_certs_windows.ps1).
+function Validate-UvIfPresent {
+    foreach ($var in @("UV_NATIVE_TLS", "UV_SYSTEM_CERTS")) {
+        $val = Get-EffectiveEnvValue -Name $var
+        if (-not [string]::IsNullOrWhiteSpace($val)) {
+            if ($val.Trim() -ne "true") {
+                Write-Host "  FAIL: ${var}=$val (expected true)" -ForegroundColor Red
+                $script:FailCount++
+            }
+        }
+    }
+}
+
+# Machine-level bundle paths (install script sets Machine scope).
+function Get-MachineCertPaths {
+    $paths = @()
+    foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE")) {
+        $val = [Environment]::GetEnvironmentVariable($var, "Machine")
+        if (-not [string]::IsNullOrWhiteSpace($val)) {
+            $val = $val.Trim().Trim('"').Trim("'")
+            if ($val -and $paths -notcontains $val) { $paths += $val }
+        }
+    }
+    return $paths
+}
+
 # Get effective cert paths for current user (User overrides Machine on Windows).
 function Get-CurrentUserCertPaths {
     $paths = @()
     foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE")) {
-        $val = [Environment]::GetEnvironmentVariable($var, "User")
-        if ([string]::IsNullOrWhiteSpace($val)) { $val = [Environment]::GetEnvironmentVariable($var, "Machine") }
+        $val = Get-EffectiveEnvValue -Name $var
         if (-not [string]::IsNullOrWhiteSpace($val)) {
             $val = $val.Trim().Trim('"').Trim("'")
             if ($val -and $paths -notcontains $val) { $paths += $val }
@@ -135,8 +169,8 @@ function Get-OtherUserCertPaths {
     try {
         if (Test-Path -LiteralPath $keyPath) {
             $nodePath = (Get-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -ErrorAction SilentlyContinue).NODE_EXTRA_CA_CERTS
-            $pipPath = (Get-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -ErrorAction SilentlyContinue).REQUESTS_CA_BUNDLE
-            foreach ($p in @($nodePath, $pipPath)) {
+            $requestsBundlePath = (Get-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -ErrorAction SilentlyContinue).REQUESTS_CA_BUNDLE
+            foreach ($p in @($nodePath, $requestsBundlePath)) {
                 if (-not [string]::IsNullOrWhiteSpace($p)) {
                     $p = $p.Trim().Trim('"').Trim("'")
                     if ($p -and $paths -notcontains $p) { $paths += $p }
@@ -157,13 +191,20 @@ if ($AllUsers) {
         Write-Host "Error: -AllUsers requires admin. Run as Administrator." -ForegroundColor Red
         exit 1
     }
-    Write-Host "Validating all users' config and cert paths..."
+    Write-Host "Validating Machine-level cert paths and env..."
+    $machinePaths = Get-MachineCertPaths
+    foreach ($p in $machinePaths) {
+        Validate-Pem -Path $p | Out-Null
+    }
+    Validate-UvIfPresent
+
+    Write-Host "Validating per-user overrides (User env in each profile)..."
     $userDirs = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @('Public', 'Default', 'Default User') }
     foreach ($ud in $userDirs) {
         $userHome = $ud.FullName
         $paths = Get-OtherUserCertPaths -ProfilePath $userHome
         if ($paths.Count -eq 0) {
-            Write-Host "  SKIP: user $($ud.Name) has no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE set"
+            Write-Host "  SKIP: user $($ud.Name) has no User-level NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE"
             continue
         }
         Write-Host "  Checking user $($ud.Name)..."
@@ -173,9 +214,10 @@ if ($AllUsers) {
     }
 } else {
     Write-Host "Validating current user config (env) and cert path(s)..."
+    Validate-UvIfPresent
     $paths = Get-CurrentUserCertPaths
     if ($paths.Count -eq 0) {
-        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE set for current user"
+        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE in User or Machine for current user"
     } else {
         foreach ($p in $paths) {
             Validate-Pem -Path $p | Out-Null
