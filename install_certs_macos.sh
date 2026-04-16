@@ -3,7 +3,7 @@
 # Run: bash install_certs_macos.sh [OPTIONS]
 #
 # Options:
-#   --package npm|pip|all      What to configure: npm, pip (REQUESTS_CA_BUNDLE), or all (default: all)
+#   --package npm|pip|all      What to configure: npm, pip (REQUESTS_CA_BUNDLE + UV_NATIVE_TLS + UV_SYSTEM_CERTS), or all (default: all)
 #   --cert-name <pattern>      Wildcard/regex to match exactly one cert in keychain (requires --extract-path)
 #   --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem) (requires --cert-name)
 #   --use-cert <path>          Path to an already existing PEM cert file (cannot be used with --cert-name/--extract-path)
@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [--package npm|pip|all] [--cert-name <pattern> --extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|pip|all      Configure npm (NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA), pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE), or both (default: all)"
+            echo "  --package npm|pip|all      Configure npm (NODE_EXTRA_CA_CERTS, NODE_USE_SYSTEM_CA), pip (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE), or both (default: all)"
             echo "  --cert-name <pattern>      Wildcard/regex to match exactly one cert in keychain (requires --extract-path)"
             echo "  --extract-path <path>      Path under each user's home (writes ~/<path>/package-route.pem) (requires --cert-name)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --cert-name/--extract-path)"
@@ -270,7 +270,7 @@ replace_export_in_file() {
     awk -v var="$var" -v val="$escaped" '
         $0 ~ "^export " var "=" { print "export " var "=\"" val "\""; next }
         { print }
-    ' "$f" > "$tmp" && mv "$tmp" "$f"
+    ' "$f" > "$tmp" && cat "$tmp" > "$f" && rm -f "$tmp"
 }
 
 # Ensure NODE_USE_SYSTEM_CA=1: add if missing, replace if value != 1, leave as-is if already 1.
@@ -287,16 +287,32 @@ ensure_node_use_system_ca() {
     fi
 }
 
-# Ensure UV_NATIVE_TLS=1: add if missing, replace if value != 1, leave as-is if already 1.
+# Ensure UV_NATIVE_TLS=true: add if missing, replace if wrong value. Deprecated but still works on uv < 0.11.0.
 ensure_uv_native_tls() {
     local f="$1" current
     [ ! -f "$f" ] && return 1
     if ! grep -q '^export UV_NATIVE_TLS=' "$f" 2>/dev/null; then
-        echo "export UV_NATIVE_TLS=1" >> "$f"
+        echo "export UV_NATIVE_TLS=true" >> "$f"
     else
         current=$(grep -E '^export UV_NATIVE_TLS=' "$f" 2>/dev/null | head -1 | sed -E 's/^export UV_NATIVE_TLS=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
-        if [ "$current" != "1" ]; then
-            replace_export_in_file "$f" "UV_NATIVE_TLS" "1"
+        if [ "$current" != "true" ] && [ "$current" != "1" ]; then
+            replace_export_in_file "$f" "UV_NATIVE_TLS" "true"
+        fi
+    fi
+}
+
+# Ensure UV_SYSTEM_CERTS=true: add if missing, replace if wrong value. Requires uv >= 0.11.0 (March 2026).
+# This is the recommended replacement for UV_NATIVE_TLS — keeps rustls but delegates cert
+# verification to the OS store via rustls-platform-verifier. We set both for compatibility.
+ensure_uv_system_certs() {
+    local f="$1" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q '^export UV_SYSTEM_CERTS=' "$f" 2>/dev/null; then
+        echo "export UV_SYSTEM_CERTS=true" >> "$f"
+    else
+        current=$(grep -E '^export UV_SYSTEM_CERTS=' "$f" 2>/dev/null | head -1 | sed -E 's/^export UV_SYSTEM_CERTS=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "true" ] && [ "$current" != "1" ]; then
+            replace_export_in_file "$f" "UV_SYSTEM_CERTS" "true"
         fi
     fi
 }
@@ -348,7 +364,9 @@ else
     fi
 fi
 
-# Writes or updates NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE in the user's .zshrc to point to cert_path. Merging of old PEMs into the new file is done in write_merged_pem_file.
+# Writes or updates NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE in the user's .zshrc.
+# The cert_path points to a single PEM file exported from both macOS Keychains,
+# containing all system roots + enterprise CAs (including Zscaler).
 add_exports_to_file() {
     local f="$1" cert_path="$2" expand_home P
     [ ! -f "$cert_path" ] && return 0
@@ -371,10 +389,12 @@ add_exports_to_file() {
         if [ -z "$P" ]; then
             echo "" >> "$f"
             ensure_uv_native_tls "$f"
+            ensure_uv_system_certs "$f"
             echo "export REQUESTS_CA_BUNDLE=\"$cert_path\"" >> "$f"
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
             ensure_uv_native_tls "$f"
+            ensure_uv_system_certs "$f"
         fi
     fi
 }
@@ -383,6 +403,9 @@ add_exports_to_file() {
 for homedir in /Users/*; do
     [ "$homedir" = "/Users/Shared" ] && continue
     [ ! -d "$homedir" ] && continue
+    # Skip system folders (UIDs below 501 are not human users on macOS)
+    owner_uid=$(stat -f '%u' "$homedir" 2>/dev/null) || continue
+    [ "$owner_uid" -lt 501 ] && continue
 
     if [ -n "$USE_CERT" ]; then
         user_cert_path="$USE_CERT"
@@ -392,34 +415,44 @@ for homedir in /Users/*; do
         mkdir -p "$(dirname "$user_cert_path")" 2>/dev/null || true
     fi
 
-    # This user's old paths from their .zshrc only (for merge).
-    user_old_paths=()
-    if [ -f "$homedir/.zshrc" ]; then
-        expand_home="$homedir"
-        for _v in NODE_EXTRA_CA_CERTS REQUESTS_CA_BUNDLE; do
-            _q=$(get_export_path "$homedir/.zshrc" "$_v" "$expand_home")
-            [ -z "$_q" ] || [ ! -f "$_q" ] && continue
-            case " ${user_old_paths[*]} " in *" $_q "*) continue ;; esac
-            user_old_paths+=("$_q")
-        done
-    fi
-
     if [ -z "$USE_CERT" ]; then
-        write_merged_pem_file "$user_cert_path" "$PEM" "${user_old_paths[@]}"
-        validate_pem "$user_cert_path" || { echo "[Error] Extracted PEM is invalid: $user_cert_path" >&2; exit 1; }
+        # Export ALL trusted root CAs from both macOS Keychains into a single PEM file.
+        # This includes Apple's system roots AND enterprise additions (like Zscaler CA).
+        #
+        # We use the Keychains (NOT /etc/ssl/cert.pem) because:
+        #   - /etc/ssl/cert.pem is a STATIC file, only updated with macOS version upgrades
+        #   - SystemRootCertificates.keychain is DYNAMICALLY updated by Apple via trust
+        #     store updates (independent of macOS upgrades), so it has ~20-30 more CAs
+        #   - System.keychain includes enterprise CAs deployed via MDM (e.g., Zscaler)
+        #
+        # Since both keychains are exported in one shot, the Zscaler CA is automatically
+        # included — no separate extraction or merging needed.
+        security find-certificate -a -p \
+            /System/Library/Keychains/SystemRootCertificates.keychain \
+            /Library/Keychains/System.keychain \
+            > "$user_cert_path" 2>/dev/null
+        validate_pem "$user_cert_path" || { echo "[Error] Exported PEM is invalid: $user_cert_path" >&2; exit 1; }
         chmod 644 "$user_cert_path" 2>/dev/null || true
+        _cert_count=$(grep -c 'BEGIN CERTIFICATE' "$user_cert_path")
+        echo "   [info] Exported $_cert_count certs from Keychains (system roots + enterprise CAs)"
     fi
-    owner=$(stat -f '%Su:%Sg' "$homedir" 2>/dev/null) || owner="nobody:staff"
-    [ -f "$homedir/.zshrc" ] && add_exports_to_file "$homedir/.zshrc" "$user_cert_path"
+    # Directory guard: skip if .zshrc is accidentally a directory (prevents sed crash)
+    zshrc="$homedir/.zshrc"
+    if [ -d "$zshrc" ]; then
+        echo "   [warn] Skipping $zshrc because it is a directory." >&2
+        continue
+    fi
+    [ ! -f "$zshrc" ] && touch "$zshrc"
+    [ -f "$zshrc" ] && add_exports_to_file "$zshrc" "$user_cert_path"
     # replace_export_in_file (used inside add_exports_to_file) does mv of a root-owned temp over .zshrc, so we must chown back to the user
-    [ -f "$homedir/.zshrc" ] && chown "$owner" "$homedir/.zshrc"
+    [ -f "$zshrc" ] && chown "$owner_uid" "$zshrc"
     if [ -z "$USE_CERT" ]; then
         cert_dir="$(dirname "$user_cert_path")"
-        chown -R "$owner" "$cert_dir" 2>/dev/null || true
+        chown -R "$owner_uid" "$cert_dir" 2>/dev/null || true
         # Chown parent dirs up to homedir so the user can e.g. rm -rf the path (they own the whole chain).
         _dir="$cert_dir"
         while [ -n "$_dir" ] && [ "$_dir" != "$homedir" ]; do
-            chown "$owner" "$_dir" 2>/dev/null || true
+            chown "$owner_uid" "$_dir" 2>/dev/null || true
             _dir="$(dirname "$_dir")"
         done
     fi
@@ -430,7 +463,7 @@ if [ -n "$USE_CERT" ]; then
 else
     echo "   Certificate exported to each user's cert path (owned by user)."
 fi
-echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or UV_NATIVE_TLS / REQUESTS_CA_BUNDLE added to each user's existing .zshrc."
+echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or UV_NATIVE_TLS / UV_SYSTEM_CERTS / REQUESTS_CA_BUNDLE added to each user's existing .zshrc."
 
 echo "---------------------------------------------------"
 echo "[3/3] COMPLETE!"
