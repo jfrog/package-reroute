@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# (c) JFrog Ltd. (2026)
 # Export macOS Keychain CAs and configure Node/npm and/or pip for redirect-proxy usage.
 # Run: sudo bash install_certs_macos.sh [OPTIONS]
 #

@@ -1,3 +1,4 @@
+# (c) JFrog Ltd. (2026)
 # Validate certificate installation: PEM file(s) exist and are valid; require subject match.
 # See README for usage. -ExpectedSubject is required. Exit 0 = all checks passed.
 
