@@ -224,7 +224,7 @@ if [ -z "$USE_CERT" ]; then
     [ "$found" -eq 0 ] && { echo "[Error] No certificate matching '$CERT_NAME' found in Keychain." >&2; exit 1; }
 else
     echo "[1/3] Using existing certificate at $USE_CERT..."
-    validate_pem "$USE_CERT" || { echo "[Error] Invalid PEM at: $USE_CERT" >&2; exit 1; }
+    validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
 fi
 
 # Writes/updates cert-related env vars in the user's .zshrc. When `cert_path` is a
