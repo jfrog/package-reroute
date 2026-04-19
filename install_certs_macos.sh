@@ -5,29 +5,28 @@
 #
 # Options:
 #   --package npm|pip|all      What to configure: npm, pip, or both (default: all)
-#   --cert-name <pattern>      Wildcard/regex to validate the expected cert exists in Keychain
-#                              (requires --extract-path)
 #   --extract-path <path>      Path under each user's home for the PEM
-#                              (writes ~/<path>/package-route.pem). Requires --cert-name.
-#   --use-cert <path>          Path to an already-existing PEM cert file
-#                              (cannot be combined with --cert-name/--extract-path)
+#                              (writes ~/<path>/package-route.pem). The PEM is a single
+#                              export of BOTH macOS Keychains (SystemRootCertificates +
+#                              System) — includes Apple's system roots AND enterprise
+#                              CAs like Zscaler. Cannot be combined with --use-cert.
+#   --use-cert <path>          Path to an already-existing PEM cert file. Sets env vars
+#                              to point at this file; does not touch the Keychain.
+#                              Cannot be combined with --extract-path.
 #   --install-dependencies     If openssl is missing, install it via Homebrew and continue
 #
-# Either (--cert-name AND --extract-path) OR --use-cert must be provided, not both.
+# Either --extract-path OR --use-cert must be provided (exactly one).
 #
 # What it writes:
-#   Per-user PEM bundle at ~/<extract-path>/package-route.pem, which is a single-file
-#   export of BOTH Keychains (SystemRootCertificates + System) — this includes Apple's
-#   system roots AND enterprise CAs like Zscaler. No merging needed — the Keychain is
-#   already the dynamic source of truth.
+#   Per-user PEM bundle at ~/<extract-path>/package-route.pem (full Keychain dump).
 #
 #   User's .zshrc gets these env vars (pointing at the PEM file):
 #     NODE_USE_SYSTEM_CA=1, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS=true,
 #     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE
 #
 # After run, users need a new shell (or source ~/.zshrc) to pick up env vars.
-# To verify: run scripts/validate_install_macos.sh (no root) for current user,
-# or sudo scripts/validate_install_macos.sh --all-users.
+# To verify: run validate_install_macos.sh for current user,
+# or sudo validate_install_macos.sh --all-users.
 
 set -e
 
@@ -36,7 +35,6 @@ SCRIPT_TMP=$(mktemp -d)
 trap '[ -n "${SCRIPT_TMP:-}" ] && rm -rf "$SCRIPT_TMP"' EXIT
 
 PACKAGE=""
-CERT_NAME=""
 EXTRACT_PATH=""
 USE_CERT=""
 INSTALL_DEPS=0
@@ -45,10 +43,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --package)
             PACKAGE="${2:?Error: --package requires a value}"
-            shift 2
-            ;;
-        --cert-name)
-            CERT_NAME="${2:?Error: --cert-name requires a value}"
             shift 2
             ;;
         --extract-path)
@@ -64,15 +58,14 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--package npm|pip|all] [--cert-name <pattern> --extract-path <path> | --use-cert <path>] [--install-dependencies]"
+            echo "Usage: $0 [--package npm|pip|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
             echo "  --package npm|pip|all      Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), pip (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE), or both (default: all)"
-            echo "  --cert-name <pattern>      Wildcard/regex to validate the expected cert exists in Keychain (requires --extract-path)"
-            echo "  --extract-path <path>      Path under each user's home (writes ~/<path>/package-route.pem) (requires --cert-name)"
-            echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --cert-name/--extract-path)"
+            echo "  --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem as a full Keychain dump)"
+            echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --extract-path)"
             echo "  --install-dependencies     Install openssl via Homebrew if missing, then continue"
             echo ""
-            echo "Either (--cert-name and --extract-path) OR --use-cert must be provided."
+            echo "Either --extract-path or --use-cert must be provided (exactly one)."
             exit 0
             ;;
         *)
@@ -93,33 +86,25 @@ case "$PACKAGE" in
         ;;
 esac
 
-# Cert source: either (cert-name + extract-path) or use-cert, not both.
-if [ -n "$USE_CERT" ]; then
-    if [ -n "$CERT_NAME" ] || [ -n "$EXTRACT_PATH" ]; then
-        echo "Error: --use-cert cannot be used together with --cert-name or --extract-path." >&2
-        exit 1
-    fi
-    [ ! -f "$USE_CERT" ] && { echo "Error: --use-cert path is not a file: $USE_CERT" >&2; exit 1; }
-else
-    if [ -n "$CERT_NAME" ] && [ -z "$EXTRACT_PATH" ]; then
-        echo "Error: --cert-name requires --extract-path to be set." >&2
-        exit 1
-    fi
-    if [ -n "$EXTRACT_PATH" ] && [ -z "$CERT_NAME" ]; then
-        echo "Error: --extract-path requires --cert-name to be set." >&2
-        exit 1
-    fi
-    if [ -z "$CERT_NAME" ] && [ -z "$EXTRACT_PATH" ]; then
-        echo "Error: either (--cert-name and --extract-path) or --use-cert must be provided." >&2
-        echo "Run $0 --help for usage." >&2
-        exit 1
-    fi
+# Cert source: exactly one of --extract-path or --use-cert.
+if [ -n "$USE_CERT" ] && [ -n "$EXTRACT_PATH" ]; then
+    echo "Error: --use-cert and --extract-path cannot be used together." >&2
+    exit 1
+fi
+if [ -z "$USE_CERT" ] && [ -z "$EXTRACT_PATH" ]; then
+    echo "Error: either --extract-path or --use-cert must be provided." >&2
+    echo "Run $0 --help for usage." >&2
+    exit 1
+fi
+if [ -n "$USE_CERT" ] && [ ! -f "$USE_CERT" ]; then
+    echo "Error: --use-cert path is not a file: $USE_CERT" >&2
+    exit 1
 fi
 
 # Prepend common paths so openssl and security (Keychain) are found when PATH is minimal (e.g. under some MDM runners).
 export PATH="/usr/bin:/opt/homebrew/opt/openssl/bin:/opt/homebrew/bin:/usr/local/opt/openssl/bin:/usr/local/bin:$PATH"
 
-# Must run as root: script writes under /Users/* and (when using --cert-name) reads system keychains.
+# Must run as root: script writes under /Users/* and reads system keychains.
 if [ "$(id -u)" -ne 0 ]; then
     echo "Error: this script must be run as root. Use: sudo $0 [options]" >&2
     exit 1
@@ -208,27 +193,14 @@ ensure_export() {
     fi
 }
 
-# Validate (when using --cert-name) that the expected cert exists in the Keychain.
-# We don't use this cert directly — the export step below dumps both entire Keychains.
-# This is a precondition check to fail fast on machines where the Zscaler CA hasn't
-# been deployed yet.
-if [ -z "$USE_CERT" ]; then
-    echo "[1/3] Validating certificate '$CERT_NAME' exists in Keychain..."
-    found=0
-    for kc in /Library/Keychains/System.keychain /System/Library/Keychains/SystemRootCertificates.keychain; do
-        [ -f "$kc" ] || continue
-        if security find-certificate -c "$CERT_NAME" -p "$kc" 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
-            found=1; break
-        fi
-    done
-    [ "$found" -eq 0 ] && { echo "[Error] No certificate matching '$CERT_NAME' found in Keychain." >&2; exit 1; }
-else
+if [ -n "$USE_CERT" ]; then
     echo "[1/3] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
+else
+    echo "[1/3] Preparing per-user PEM bundle (full Keychain export)..."
 fi
 
-# Writes/updates cert-related env vars in the user's .zshrc. When `cert_path` is a
-# directory (not used today but supported as a fallback), the same value goes in.
+# Writes/updates cert-related env vars in the user's .zshrc.
 add_exports_to_file() {
     local f="$1" cert_path="$2"
     [ ! -e "$cert_path" ] && return 0
