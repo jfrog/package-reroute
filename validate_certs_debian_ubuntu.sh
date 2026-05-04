@@ -28,7 +28,8 @@ Options:
   -h, --help                       Show this help
 
 Also validates $PROFILED_FILE when it exists: path exports (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE,
-SSL_CERT_FILE) and, if present, UV_NATIVE_TLS / UV_SYSTEM_CERTS (=true).
+SSL_CERT_FILE) and, if present, UV_NATIVE_TLS / UV_SYSTEM_CERTS (=true); HF_HUB_DISABLE_XET (=1),
+HF_HUB_ETAG_TIMEOUT / HF_HUB_DOWNLOAD_TIMEOUT (=86400).
 EOF
 }
 
@@ -148,6 +149,32 @@ validate_uv_if_present() {
     done
 }
 
+# If install script wrote HF_* exports, values must match install_certs_debian_ubuntu.sh.
+validate_hf_if_present() {
+    local f="$1"
+    local var val
+    [[ ! -f "$f" ]] && return 0
+    for var in HF_HUB_DISABLE_XET HF_HUB_ETAG_TIMEOUT HF_HUB_DOWNLOAD_TIMEOUT; do
+        if grep -qE "^export ${var}=" "$f" 2>/dev/null; then
+            val="$(get_export_value "$f" "$var")"
+            case "$var" in
+                HF_HUB_DISABLE_XET)
+                    if [[ "$val" != "1" ]]; then
+                        echo "  FAIL: $f has ${var}=${val:-<empty>} (expected 1)"
+                        FAIL=$((FAIL + 1))
+                    fi
+                    ;;
+                HF_HUB_ETAG_TIMEOUT|HF_HUB_DOWNLOAD_TIMEOUT)
+                    if [[ "$val" != "86400" ]]; then
+                        echo "  FAIL: $f has ${var}=${val:-<empty>} (expected 86400)"
+                        FAIL=$((FAIL + 1))
+                    fi
+                    ;;
+            esac
+        fi
+    done
+}
+
 validate_from_rc_files() {
     local label="$1" home="$2"
     shift 2
@@ -162,6 +189,7 @@ validate_from_rc_files() {
         validate_path_deduped "$(get_export_path "$rc" "REQUESTS_CA_BUNDLE" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "SSL_CERT_FILE" "$home")"
         validate_uv_if_present "$rc"
+        validate_hf_if_present "$rc"
     done
 
     if [[ $any -eq 0 ]]; then
@@ -186,6 +214,7 @@ validate_profiled() {
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "REQUESTS_CA_BUNDLE" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "SSL_CERT_FILE" "")"
     validate_uv_if_present "$PROFILED_FILE"
+    validate_hf_if_present "$PROFILED_FILE"
 
     if [[ "$DEDUPE" == "|" ]]; then
         echo "  WARN: no CA path exports in $PROFILED_FILE"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
 # Validate certificate installation: PEM file(s) exist and are valid; require subject match.
+# Also validates HF_HUB_* env exports in .zshrc when present (matches install_certs_macos.sh with pip/all).
 # See README for usage. --expected-subject is required. Exit 0 = all checks passed.
 
 set -e
@@ -71,16 +72,51 @@ validate_pem() {
     return 0
 }
 
+get_export_value() {
+    local f="$1" var="$2"
+    local line val
+    [ ! -f "$f" ] && echo "" && return 0
+    line=$(grep -E "^export ${var}=" "$f" 2>/dev/null | head -1) || true
+    [ -z "$line" ] && echo "" && return 0
+    val=$(echo "$line" | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+    echo "$val"
+}
+
 # Read first "export VAR=..." from file; strip quotes and expand ~. Used for NODE_EXTRA_CA_CERTS and REQUESTS_CA_BUNDLE.
 get_export_path() {
     local f="$1" var="$2" expand_home="${3:-}"
-    local line path
+    local path
     [ ! -f "$f" ] && return 0
-    line=$(grep -E "^export ${var}=" "$f" 2>/dev/null | head -1)
-    [ -z "$line" ] && echo "" && return 0
-    path=$(echo "$line" | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+    path=$(get_export_value "$f" "$var")
+    [ -z "$path" ] && echo "" && return 0
     [ -n "$expand_home" ] && [ -z "${path%%~*}" ] && path="${expand_home}${path#\~}"
     echo "$path"
+}
+
+# If install script wrote HF_* exports, values must match install_certs_macos.sh.
+validate_hf_if_present() {
+    local f="$1"
+    local var val
+    [ ! -f "$f" ] && return 0
+    for var in HF_HUB_DISABLE_XET HF_HUB_ETAG_TIMEOUT HF_HUB_DOWNLOAD_TIMEOUT; do
+        if grep -qE "^export ${var}=" "$f" 2>/dev/null; then
+            val=$(get_export_value "$f" "$var")
+            case "$var" in
+                HF_HUB_DISABLE_XET)
+                    if [ "$val" != "1" ]; then
+                        echo "  FAIL: $f has ${var}=${val:-<empty>} (expected 1)"
+                        FAIL=$((FAIL + 1))
+                    fi
+                    ;;
+                HF_HUB_ETAG_TIMEOUT|HF_HUB_DOWNLOAD_TIMEOUT)
+                    if [ "$val" != "86400" ]; then
+                        echo "  FAIL: $f has ${var}=${val:-<empty>} (expected 86400)"
+                        FAIL=$((FAIL + 1))
+                    fi
+                    ;;
+            esac
+        fi
+    done
 }
 
 # For one user: read .zshrc, get cert paths from exports, validate each PEM. Skips if no .zshrc or no exports.
@@ -108,6 +144,7 @@ validate_user_config() {
     if [ -n "$pip_path" ] && [ "$pip_path" != "$node_path" ]; then
         validate_pem "$pip_path" || FAIL=$((FAIL+1))
     fi
+    validate_hf_if_present "$zshrc"
 }
 
 if [ "$ALL_USERS" -eq 1 ]; then

@@ -197,6 +197,9 @@ write_profiled() {
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
             echo "export UV_NATIVE_TLS=true"
             echo "export UV_SYSTEM_CERTS=true"
+            echo "export HF_HUB_DISABLE_XET=1"
+            echo "export HF_HUB_ETAG_TIMEOUT=86400"
+            echo "export HF_HUB_DOWNLOAD_TIMEOUT=86400"
             echo
         fi
     } > "$PROFILED_FILE"
@@ -293,6 +296,9 @@ update_user_shell_rc() {
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "UV_NATIVE_TLS" "true"
         ensure_export_in_file "$rc_file" "UV_SYSTEM_CERTS" "true"
+        ensure_export_in_file "$rc_file" "HF_HUB_DISABLE_XET" "1"
+        ensure_export_in_file "$rc_file" "HF_HUB_ETAG_TIMEOUT" "86400"
+        ensure_export_in_file "$rc_file" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
     fi
 
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true
@@ -331,6 +337,9 @@ print_done() {
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
         echo "  UV_NATIVE_TLS=true"
         echo "  UV_SYSTEM_CERTS=true"
+        echo "  HF_HUB_DISABLE_XET=1"
+        echo "  HF_HUB_ETAG_TIMEOUT=86400"
+        echo "  HF_HUB_DOWNLOAD_TIMEOUT=86400"
         echo
     fi
 
@@ -344,7 +353,7 @@ print_done() {
         echo "  npm i axios"
     fi
     if do_python; then
-        echo "  env | grep -E 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|UV_NATIVE_TLS|UV_SYSTEM_CERTS'"
+        echo "  env | grep -E 'REQUESTS_CA_BUNDLE|SSL_CERT_FILE|UV_NATIVE_TLS|UV_SYSTEM_CERTS|HF_HUB_'"
         echo "  python3 -m venv .venv"
         echo "  source .venv/bin/activate"
         echo "  python -m pip install requests"

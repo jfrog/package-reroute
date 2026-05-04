@@ -302,6 +302,27 @@ ensure_uv_native_tls() {
     fi
 }
 
+# Hugging Face Hub download behavior (Python tooling).
+ensure_hf_hub_var() {
+    local f="$1" var="$2" value="$3" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q "^export ${var}=" "$f" 2>/dev/null; then
+        echo "export ${var}=${value}" >> "$f"
+    else
+        current=$(grep -E "^export ${var}=" "$f" 2>/dev/null | head -1 | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "$value" ]; then
+            replace_export_in_file "$f" "$var" "$value"
+        fi
+    fi
+}
+
+ensure_hf_hub_vars() {
+    local f="$1"
+    ensure_hf_hub_var "$f" "HF_HUB_DISABLE_XET" "1"
+    ensure_hf_hub_var "$f" "HF_HUB_ETAG_TIMEOUT" "86400"
+    ensure_hf_hub_var "$f" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
+}
+
 if [ -n "$USE_CERT" ]; then
     echo "[1/3] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
@@ -372,10 +393,12 @@ add_exports_to_file() {
         if [ -z "$P" ]; then
             echo "" >> "$f"
             ensure_uv_native_tls "$f"
+            ensure_hf_hub_vars "$f"
             echo "export REQUESTS_CA_BUNDLE=\"$cert_path\"" >> "$f"
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
             ensure_uv_native_tls "$f"
+            ensure_hf_hub_vars "$f"
         fi
     fi
 }
@@ -431,7 +454,7 @@ if [ -n "$USE_CERT" ]; then
 else
     echo "   Certificate exported to each user's cert path (owned by user)."
 fi
-echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or UV_NATIVE_TLS / REQUESTS_CA_BUNDLE added to each user's existing .zshrc."
+echo "   + NODE_USE_SYSTEM_CA / NODE_EXTRA_CA_CERTS and/or UV_NATIVE_TLS / REQUESTS_CA_BUNDLE / HF_HUB_* added to each user's existing .zshrc."
 
 echo "---------------------------------------------------"
 echo "[3/3] COMPLETE!"

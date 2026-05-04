@@ -146,6 +146,18 @@ else
     assert_exit 0 "'$VALIDATE_SCRIPT' --expected-subject test-cert --all-users 2>/dev/null"
 fi
 
+# validate_install_macos.sh: HF_HUB_* present with wrong value must fail
+printf '%s\n' "export NODE_EXTRA_CA_CERTS=\"$TMP/cert.pem\"" "export HF_HUB_DISABLE_XET=0" > "$MOCK_HOME/.zshrc"
+assert_exit 1 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert 2>/dev/null"
+
+# Correct HF vars alongside cert path must pass
+printf '%s\n' \
+    "export NODE_EXTRA_CA_CERTS=\"$TMP/cert.pem\"" \
+    "export HF_HUB_DISABLE_XET=1" \
+    "export HF_HUB_ETAG_TIMEOUT=86400" \
+    "export HF_HUB_DOWNLOAD_TIMEOUT=86400" > "$MOCK_HOME/.zshrc"
+assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
+
 echo ""
 echo "=== Fingerprint and merge tests (same / different cert) ==="
 
@@ -493,6 +505,49 @@ else
     echo "  FAIL ($RUN): expected 1 line after two ensures, got n=$n"
     FAIL=$((FAIL + 1))
 fi
+
+echo ""
+echo "=== HF_HUB_* ensure logic (matches install_certs_macos.sh ensure_hf_hub_var) ==="
+
+ensure_hf_hub_var_test() {
+    local f="$1" var="$2" value="$3" current
+    [ ! -f "$f" ] && return 1
+    if ! grep -q "^export ${var}=" "$f" 2>/dev/null; then
+        echo "export ${var}=${value}" >> "$f"
+    else
+        current=$(grep -E "^export ${var}=" "$f" 2>/dev/null | head -1 | sed -E "s/^export ${var}=//" | sed -E 's/^["'\'']//;s/["'\'']$//')
+        if [ "$current" != "$value" ]; then
+            replace_export_in_file_test "$f" "$var" "$value"
+        fi
+    fi
+}
+
+ensure_hf_hub_vars_test() {
+    ensure_hf_hub_var_test "$1" "HF_HUB_DISABLE_XET" "1"
+    ensure_hf_hub_var_test "$1" "HF_HUB_ETAG_TIMEOUT" "86400"
+    ensure_hf_hub_var_test "$1" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
+}
+
+# 1) Install all three from empty file
+echo "" > "$TMP/hf1"
+ensure_hf_hub_vars_test "$TMP/hf1"
+RUN=$((RUN + 1))
+if grep -q "^export HF_HUB_DISABLE_XET=1$" "$TMP/hf1" 2>/dev/null \
+    && grep -q "^export HF_HUB_ETAG_TIMEOUT=86400$" "$TMP/hf1" 2>/dev/null \
+    && grep -q "^export HF_HUB_DOWNLOAD_TIMEOUT=86400$" "$TMP/hf1" 2>/dev/null; then
+    echo "  OK ($RUN): ensure_hf_hub_vars adds all three exports"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL ($RUN): expected three HF_HUB exports"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2) Wrong timeout → replaced
+printf '%s\n' "export HF_HUB_DOWNLOAD_TIMEOUT=1" > "$TMP/hf2"
+ensure_hf_hub_vars_test "$TMP/hf2"
+val=$(grep -E '^export HF_HUB_DOWNLOAD_TIMEOUT=' "$TMP/hf2" | head -1 | sed -E 's/^export HF_HUB_DOWNLOAD_TIMEOUT=//' | sed -E 's/^["'\'']//;s/["'\'']$//')
+RUN=$((RUN + 1))
+[ "$val" = "86400" ] && { echo "  OK ($RUN): HF_HUB_DOWNLOAD_TIMEOUT wrong value → corrected"; PASS=$((PASS + 1)); } || { echo "  FAIL ($RUN): expected 86400, got $val"; FAIL=$((FAIL + 1)); }
 
 echo ""
 echo "---------------------------------------------------"

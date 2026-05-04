@@ -1,5 +1,5 @@
 # (c) JFrog Ltd. (2026)
-# Tests for install_certs_windows.ps1 (CLI and parameter validation) and validate_install_windows.ps1.
+# Tests for install_certs_windows.ps1 (CLI, LocalMachine\Root export, Python/HF Machine env) and validate_install_windows.ps1.
 # Run from repo root: powershell -ExecutionPolicy Bypass -File scripts/testing/test_install_certs_windows.ps1
 # Or from scripts/: powershell -ExecutionPolicy Bypass -File testing/test_install_certs_windows.ps1
 # No admin required; uses a temp dir and a self-signed PEM. See scripts/README.md for coverage.
@@ -109,100 +109,135 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
 
     Write-Host "=== install_certs_windows.ps1 CLI tests ==="
 
-    # No cert source (only -Package; no parameter set selected)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
-    Assert-Stderr -Pattern "Parameter set|cannot be resolved|ExtractPath|UseCert" -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
+    $machineEnvNames = @(
+        "NODE_USE_SYSTEM_CA",
+        "NODE_EXTRA_CA_CERTS",
+        "UV_NATIVE_TLS",
+        "UV_SYSTEM_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "HF_HUB_DISABLE_XET",
+        "HF_HUB_ETAG_TIMEOUT",
+        "HF_HUB_DOWNLOAD_TIMEOUT"
+    )
 
-    # Invalid -Package
+    function Save-MachineEnvForTest {
+        $h = @{}
+        foreach ($n in $machineEnvNames) {
+            $h[$n] = [Environment]::GetEnvironmentVariable($n, "Machine")
+        }
+        return $h
+    }
+
+    function Restore-MachineEnvForTest {
+        param($Hash)
+        if (-not $Hash) { return }
+        foreach ($n in $machineEnvNames) {
+            $val = $null
+            if ($Hash.ContainsKey($n)) { $val = $Hash[$n] }
+            [Environment]::SetEnvironmentVariable($n, $val, "Machine")
+        }
+    }
+
+    function Clear-InstallMachineEnv {
+        foreach ($n in $machineEnvNames) {
+            [Environment]::SetEnvironmentVariable($n, $null, "Machine")
+        }
+    }
+
+    # Invalid -Package (ValidateSet)
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
-    Assert-Stderr -Pattern "ValidateSet|npm|pip|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
+    Assert-Stderr -Pattern "ValidateSet|npm|python|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
 
-    # -CertName without -ExtractPath (PowerShell requires both in set)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
-    Assert-Stderr -Pattern "ExtractPath|Missing|argument for parameter|ParameterSet|required" -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
+    # -CertName pattern matches nothing in LocalMachine\Root
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "all", "-CertName", "ZZZNonexistentRootCertPattern999")
+    Assert-Stderr -Pattern "No certificate|Root|matched" -ScriptPath $InstallScript -ScriptArguments @("-Package", "all", "-CertName", "ZZZNonexistentRootCertPattern999")
 
-    # -ExtractPath without -CertName
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
-    Assert-Stderr -Pattern "CertName|Missing|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
-
-    # -UseCert and -CertName together
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
-    Assert-Stderr -Pattern "cannot be used together|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
-
-    # -UseCert with nonexistent file
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $Nonexistent)
-    Assert-Stderr -Pattern "not a file|UseCert|Error" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $Nonexistent)
-
-    # -UseCert with invalid PEM (file exists but not valid)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $InvalidPath)
-    Assert-Stderr -Pattern "Invalid or missing PEM|Error" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $InvalidPath)
-
-    # -UseCert with valid PEM: may succeed (sets env) or fail; we only check it doesn't error with "not a file" or "Invalid PEM"
-    $Run++
-    $r = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath)
-    if (-not (($r.Stdout + $r.Stderr) -match "not a file|Invalid or missing PEM")) {
-        Write-Host "  OK ($Run): -UseCert with valid PEM (exit $($r.ExitCode))"
-        $script:Pass++
-    } else {
-        Write-Host "  FAIL ($Run): -UseCert with valid PEM produced unexpected error"
-        $script:Fail++
-    }
-
-    Write-Host ""
-    Write-Host "=== install_certs_windows.ps1 pip / UV_NATIVE_TLS flow ==="
-
-    # -UseCert -Package pip: install sets Machine UV_NATIVE_TLS=1 and REQUESTS_CA_BUNDLE to cert path; verify and clean up
-    $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
-    $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
+    $savedMachine = Save-MachineEnvForTest
     try {
-        $rPip = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "pip")
+        Clear-InstallMachineEnv
+
+        $bundlePy = Join-Path $TempDir "bundle-python.pem"
+        $rPy = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-Package", "python", "-BundlePath", $bundlePy)
         $Run++
-        if ($rPip.ExitCode -ne 0) {
-            Write-Host "  FAIL ($Run): -UseCert -Package pip expected exit 0, got $($rPip.ExitCode)"
+        $bundlePyFull = [System.IO.Path]::GetFullPath($bundlePy)
+        if ($rPy.ExitCode -ne 0) {
+            Write-Host "  FAIL ($Run): -Package python expected exit 0, got $($rPy.ExitCode)"
+            $script:Fail++
+        } elseif (-not (Test-Path -LiteralPath $bundlePy -PathType Leaf)) {
+            Write-Host "  FAIL ($Run): bundle file missing: $bundlePy"
             $script:Fail++
         } else {
+            $nodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
+            $nodeExtra = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
             $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $uvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
             $req = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
-            if ($uv -eq "1" -and $req -eq $CertPath) {
-                Write-Host "  OK ($Run): -Package pip sets UV_NATIVE_TLS=1 and REQUESTS_CA_BUNDLE"
+            $hf0 = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
+            $hf1 = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
+            $hf2 = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
+            $reqFull = if ($req) { [System.IO.Path]::GetFullPath($req.Trim().Trim('"').Trim("'")) } else { "" }
+            if ([string]::IsNullOrWhiteSpace($nodeSys) -and [string]::IsNullOrWhiteSpace($nodeExtra) -and
+                $uv -eq "true" -and $uvSys -eq "true" -and $reqFull -eq $bundlePyFull -and
+                $hf0 -eq "1" -and $hf1 -eq "86400" -and $hf2 -eq "86400") {
+                Write-Host "  OK ($Run): -Package python exports bundle and sets REQUESTS_CA_BUNDLE / UV / HF_HUB_*"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req' (expected '$CertPath')"
+                Write-Host "  FAIL ($Run): unexpected Machine env after -Package python"
+                Write-Host "    NODE_USE_SYSTEM_CA='$nodeSys' NODE_EXTRA_CA_CERTS='$nodeExtra'"
+                Write-Host "    UV_NATIVE_TLS='$uv' UV_SYSTEM_CERTS='$uvSys' REQUESTS_CA_BUNDLE='$req'"
+                Write-Host "    HF_DISABLE='$hf0' HF_ETAG='$hf1' HF_DL='$hf2'"
                 $script:Fail++
             }
         }
-    } finally {
-        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
-        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
-    }
 
-    # -UseCert -Package all: verify npm and pip vars set (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE)
-    $savedNode = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
-    $savedNodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
-    try {
-        $rAll = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "all")
+        $bundleAll = Join-Path $TempDir "bundle-all.pem"
+        Clear-InstallMachineEnv
+        $rAll = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-Package", "all", "-BundlePath", $bundleAll)
         $Run++
+        $bundleAllFull = [System.IO.Path]::GetFullPath($bundleAll)
         if ($rAll.ExitCode -ne 0) {
-            Write-Host "  FAIL ($Run): -UseCert -Package all expected exit 0, got $($rAll.ExitCode)"
+            Write-Host "  FAIL ($Run): -Package all expected exit 0, got $($rAll.ExitCode)"
+            $script:Fail++
+        } elseif (-not (Test-Path -LiteralPath $bundleAll -PathType Leaf)) {
+            Write-Host "  FAIL ($Run): bundle file missing: $bundleAll"
             $script:Fail++
         } else {
-            $uvAll = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
-            $reqAll = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
-            $nodeAll = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
-            $nodeSysAll = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
-            if ($nodeSysAll -eq "1" -and $nodeAll -eq $CertPath -and $uvAll -eq "1" -and $reqAll -eq $CertPath) {
-                Write-Host "  OK ($Run): -Package all sets NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE"
+            $nodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
+            $nodeExtra = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
+            $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $uvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
+            $req = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
+            $hf0 = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
+            $hf1 = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
+            $hf2 = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
+            $nodeExtraFull = if ($nodeExtra) { [System.IO.Path]::GetFullPath($nodeExtra.Trim().Trim('"').Trim("'")) } else { "" }
+            $reqFull = if ($req) { [System.IO.Path]::GetFullPath($req.Trim().Trim('"').Trim("'")) } else { "" }
+            if ($nodeSys -eq "1" -and $nodeExtraFull -eq $bundleAllFull -and $reqFull -eq $bundleAllFull -and
+                $uv -eq "true" -and $uvSys -eq "true" -and
+                $hf0 -eq "1" -and $hf1 -eq "86400" -and $hf2 -eq "86400") {
+                Write-Host "  OK ($Run): -Package all sets NODE / REQUESTS_CA_BUNDLE / UV / HF_HUB_* and bundle"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): NODE_USE_SYSTEM_CA='$nodeSysAll' NODE_EXTRA_CA_CERTS='$nodeAll' UV_NATIVE_TLS='$uvAll' REQUESTS_CA_BUNDLE='$reqAll'"
+                Write-Host "  FAIL ($Run): unexpected Machine env after -Package all"
+                Write-Host "    NODE_USE_SYSTEM_CA='$nodeSys' NODE_EXTRA_CA_CERTS='$nodeExtra'"
+                Write-Host "    REQUESTS_CA_BUNDLE='$req' UV_NATIVE_TLS='$uv'"
                 $script:Fail++
             }
         }
+
+        Clear-InstallMachineEnv
+        $bundleDef = Join-Path $TempDir "bundle-default.pem"
+        $rDef = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-BundlePath", $bundleDef)
+        $Run++
+        if ($rDef.ExitCode -eq 0 -and (Test-Path -LiteralPath $bundleDef -PathType Leaf)) {
+            Write-Host "  OK ($Run): default Package + -BundlePath exports LocalMachine\Root and exits 0"
+            $script:Pass++
+        } else {
+            Write-Host "  FAIL ($Run): default install expected exit 0 and bundle file, got exit $($rDef.ExitCode)"
+            $script:Fail++
+        }
     } finally {
-        [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedNode, "Machine")
-        [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $savedNodeSys, "Machine")
-        [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
-        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
+        Restore-MachineEnvForTest -Hash $savedMachine
     }
 
     Write-Host ""
@@ -315,6 +350,35 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         Write-Host "    Stdout: $($rMachine.Stdout)"
         Write-Host "    Stderr: $($rMachine.Stderr)"
         $script:Fail++
+    }
+
+    # User env: valid PEM path but HF_HUB_DISABLE_XET wrong → Validate-HfIfPresent fails
+    $Run++
+    $savedNodeUserHf = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "User")
+    $savedHfUser = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "User")
+    try {
+        [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $CertPath, "User")
+        [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "0", "User")
+        $scriptEscaped = $ValidateScript -replace "'", "''"
+        $cmd = "& '$scriptEscaped' -ExpectedSubject 'test-cert'; exit `$LASTEXITCODE"
+        $allArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd)
+        $stdoutFileHf = Join-Path $TempDir "out_hf_bad.txt"
+        $stderrFileHf = Join-Path $TempDir "err_hf_bad.txt"
+        $pHf = Start-Process -FilePath "powershell.exe" -ArgumentList $allArgs -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdoutFileHf -RedirectStandardError $stderrFileHf
+        $outHf = ""
+        if (Test-Path $stdoutFileHf) { $outHf += [System.IO.File]::ReadAllText($stdoutFileHf) }
+        if (Test-Path $stderrFileHf) { $outHf += [System.IO.File]::ReadAllText($stderrFileHf) }
+        Remove-Item $stdoutFileHf, $stderrFileHf -ErrorAction SilentlyContinue
+        if ($pHf.ExitCode -eq 1 -and $outHf -match "HF_HUB_DISABLE_XET") {
+            Write-Host "  OK ($Run): invalid User HF_HUB_DISABLE_XET → validate exit 1"
+            $script:Pass++
+        } else {
+            Write-Host "  FAIL ($Run): expected exit 1 and HF message, got $($pHf.ExitCode)"
+            $script:Fail++
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedNodeUserHf, "User")
+        [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $savedHfUser, "User")
     }
 
     Write-Host ""

@@ -1,7 +1,7 @@
 # (c) JFrog Ltd. (2026)
 # Validate certificate installation: PEM file(s) exist and are valid; require subject match.
 # Checks NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE (User then Machine) and, when set,
-# UV_NATIVE_TLS / UV_SYSTEM_CERTS (must be "true", matching install_certs_windows.ps1).
+# UV_NATIVE_TLS / UV_SYSTEM_CERTS (must be "true"); HF_HUB_* (must match install_certs_windows.ps1).
 # See README for usage. -ExpectedSubject is required. Exit 0 = all checks passed.
 
 param(
@@ -111,6 +111,25 @@ function Validate-UvIfPresent {
     }
 }
 
+# If install script set HF_* they must match install_certs_windows.ps1 (Python package).
+function Validate-HfIfPresent {
+    foreach ($var in @("HF_HUB_DISABLE_XET", "HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT")) {
+        $val = Get-EffectiveEnvValue -Name $var
+        if (-not [string]::IsNullOrWhiteSpace($val)) {
+            $expected = switch ($var) {
+                "HF_HUB_DISABLE_XET" { "1" }
+                "HF_HUB_ETAG_TIMEOUT" { "86400" }
+                "HF_HUB_DOWNLOAD_TIMEOUT" { "86400" }
+                default { "" }
+            }
+            if ($val.Trim() -ne $expected) {
+                Write-Host "  FAIL: ${var}=$val (expected $expected)" -ForegroundColor Red
+                $script:FailCount++
+            }
+        }
+    }
+}
+
 # Machine-level bundle paths (install script sets Machine scope).
 function Get-MachineCertPaths {
     $paths = @()
@@ -197,6 +216,7 @@ if ($AllUsers) {
         Validate-Pem -Path $p | Out-Null
     }
     Validate-UvIfPresent
+    Validate-HfIfPresent
 
     Write-Host "Validating per-user overrides (User env in each profile)..."
     $userDirs = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @('Public', 'Default', 'Default User') }
@@ -215,6 +235,7 @@ if ($AllUsers) {
 } else {
     Write-Host "Validating current user config (env) and cert path(s)..."
     Validate-UvIfPresent
+    Validate-HfIfPresent
     $paths = Get-CurrentUserCertPaths
     if ($paths.Count -eq 0) {
         Write-Host "  WARN: no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE in User or Machine for current user"

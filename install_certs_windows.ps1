@@ -221,6 +221,9 @@ function Print-Done {
         Write-Host "  REQUESTS_CA_BUNDLE=$PemPath"
         Write-Host "  UV_NATIVE_TLS=true"
         Write-Host "  UV_SYSTEM_CERTS=true"
+        Write-Host "  HF_HUB_DISABLE_XET=1"
+        Write-Host "  HF_HUB_ETAG_TIMEOUT=86400"
+        Write-Host "  HF_HUB_DOWNLOAD_TIMEOUT=86400"
         Write-Host ""
     }
 
@@ -234,6 +237,9 @@ function Print-Done {
         Write-Host '  [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE","Machine")'
         Write-Host '  [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS","Machine")'
         Write-Host '  [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS","Machine")'
+        Write-Host '  [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET","Machine")'
+        Write-Host '  [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT","Machine")'
+        Write-Host '  [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT","Machine")'
         Write-Host "  py -3 -m venv .venv"
         Write-Host "  .\.venv\Scripts\Activate.ps1"
         Write-Host "  python -m pip install requests"
@@ -276,9 +282,15 @@ function Main {
         Set-MachineEnvVar -Name "REQUESTS_CA_BUNDLE" -Value $resolvedBundlePath
         Set-MachineEnvVar -Name "UV_NATIVE_TLS" -Value "true"
         Set-MachineEnvVar -Name "UV_SYSTEM_CERTS" -Value "true"
+        Set-MachineEnvVar -Name "HF_HUB_DISABLE_XET" -Value "1"
+        Set-MachineEnvVar -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400"
+        Set-MachineEnvVar -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400"
         Write-Host "   + Set REQUESTS_CA_BUNDLE=$resolvedBundlePath"
         Write-Host "   + Set UV_NATIVE_TLS=true"
         Write-Host "   + Set UV_SYSTEM_CERTS=true"
+        Write-Host "   + Set HF_HUB_DISABLE_XET=1"
+        Write-Host "   + Set HF_HUB_ETAG_TIMEOUT=86400"
+        Write-Host "   + Set HF_HUB_DOWNLOAD_TIMEOUT=86400"
     }
 
     Print-Done -PemPath $resolvedBundlePath
