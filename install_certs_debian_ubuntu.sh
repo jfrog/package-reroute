@@ -23,7 +23,7 @@
 #   - Debian/Ubuntu only
 #   - Must run as root
 #   - npm uses the single installed custom cert
-#   - pip uses the full system CA bundle
+#   - pip uses the full system CA bundle; sets REQUESTS_CA_BUNDLE, SSL_CERT_FILE, and HF_HUB_* (Hugging Face Hub)
 #   - New terminals should pick up the env vars automatically
 
 set -euo pipefail
@@ -194,6 +194,9 @@ write_profiled() {
         if do_pip; then
             echo "export REQUESTS_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
+            echo "export HF_HUB_DISABLE_XET=1"
+            echo "export HF_HUB_ETAG_TIMEOUT=86400"
+            echo "export HF_HUB_DOWNLOAD_TIMEOUT=86400"
             echo
         fi
     } > "$PROFILED_FILE"
@@ -289,6 +292,9 @@ update_user_shell_rc() {
     if do_pip; then
         ensure_export_in_file "$rc_file" "REQUESTS_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "HF_HUB_DISABLE_XET" "1"
+        ensure_export_in_file "$rc_file" "HF_HUB_ETAG_TIMEOUT" "86400"
+        ensure_export_in_file "$rc_file" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
     fi
 
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true
@@ -322,6 +328,9 @@ print_done() {
         echo "pip/python environment:"
         echo "  REQUESTS_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
+        echo "  HF_HUB_DISABLE_XET=1"
+        echo "  HF_HUB_ETAG_TIMEOUT=86400"
+        echo "  HF_HUB_DOWNLOAD_TIMEOUT=86400"
         echo
     fi
 

@@ -22,6 +22,9 @@ Environment variables by platform (see each section for details):
 | `UV_NATIVE_TLS=1` | Python **uv** | macOS and Windows **pip** flows; **not** set by the Debian/Ubuntu script |
 | `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
 | `SSL_CERT_FILE=<path>` | OpenSSL-backed tools | Set on **Debian/Ubuntu** (pip flow) to the system CA bundle |
+| `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`pip` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
+| `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`pip` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
+| `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`pip` or `all`**: download timeout (seconds) |
 
 ---
 
@@ -90,7 +93,7 @@ sudo ./install_certs_macos.sh \
   --use-cert /opt/certs/company-ca.pem
 ```
 
-**3. Only configure pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE)**
+**3. Only configure pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, Hugging Face Hub env vars)**
 
 ```bash
 sudo ./install_certs_macos.sh \
@@ -166,7 +169,7 @@ Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, pip/UV_NATIVE_TLS flow: **-UseCert -Package pip** sets Machine `UV_NATIVE_TLS=1` and `REQUESTS_CA_BUNDLE`; **-Package all** sets all four vars; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, pip flow: **-UseCert -Package pip** sets Machine `UV_NATIVE_TLS=1`, `REQUESTS_CA_BUNDLE`, and Hugging Face Hub vars; **-Package all** sets npm + pip vars including HF Hub; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (repo root).
 
@@ -181,7 +184,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Pip / UV_NATIVE_TLS flow:** `-UseCert -Package pip` sets Machine `UV_NATIVE_TLS=1` and `REQUESTS_CA_BUNDLE`; `-UseCert -Package all` sets NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE. |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Pip flow:** `-UseCert -Package pip` sets Machine pip vars including `UV_NATIVE_TLS=1`, `REQUESTS_CA_BUNDLE`, and `HF_HUB_*`; `-UseCert -Package all` sets npm vars plus those pip/HF vars. |
 | **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message); system-level (Machine) env when run as admin. |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
@@ -241,6 +244,7 @@ For **pip** (if `--package` is `pip` or `all`):
 
 - Ensure `UV_NATIVE_TLS=1`: add if missing, replace if value ≠ 1, leave as-is if already 1.
 - Same idea for `REQUESTS_CA_BUNDLE`: add export if missing, or replace the path and merge the old bundle into the new cert file (again skipping duplicates by fingerprint).
+- Ensure Hugging Face Hub defaults: `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`).
 
 Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 
@@ -270,7 +274,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 `install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the **invoking non-root user’s** shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
 
 - **npm:** `NODE_USE_SYSTEM_CA=1` and `NODE_EXTRA_CA_CERTS` pointing at the **installed** cert under `/usr/local/share/ca-certificates/` (default basename `package-route-custom-ca.crt`, overridable with `--cert-name`).
-- **pip / Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows pip flows).
+- **pip / Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows pip flows). **`HF_HUB_*`** Hugging Face Hub variables are set when pip is configured (same as other platforms).
 
 ### Requirements
 
@@ -313,8 +317,8 @@ sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example
 `install_certs_windows.ps1` configures **Node/npm** and/or **Python/pip** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
 - Either **extracts** a certificate from the Windows cert store (LocalMachine\Root) by **subject substring** (`-CertName`), or **uses an existing** PEM file you provide (**-UseCert**). If **multiple** certs match the pattern, the script logs a warning and picks one (prefers a subject containing `Root`, otherwise the first match).
-- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user (npm: `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`; pip: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`).
-- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (`NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`, `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`) so that only Machine settings apply (User would otherwise override Machine on Windows).
+- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user (npm: `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`; pip: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`).
+- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (npm: `NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`; pip: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`) so that only Machine settings apply (User would otherwise override Machine on Windows).
 
 Re-runs **merge** certs: if the target file already exists, the script saves its content, overwrites with the new cert, then appends other certs from the saved copy (dedupe by SHA-256 fingerprint). So running with a second cert adds it to the bundle instead of replacing it.
 
@@ -367,8 +371,8 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 - **Admin required.** The script must be run as Administrator (or SYSTEM).
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
-- **Extract path:** per-user **package-route.pem** and User-level env (npm: NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS; pip: UV_NATIVE_TLS, REQUESTS_CA_BUNDLE); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** no PEM written; Machine-level env set (same four vars when `-Package all`); User-level cert vars are **deleted** so only Machine applies.
+- **Extract path:** per-user **package-route.pem** and User-level env (npm: NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS; pip: UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF_HUB_*); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
+- **UseCert:** no PEM written; Machine-level env set (npm + pip vars per `-Package`, including HF Hub when pip is included); User-level cert vars are **deleted** so only Machine applies.
 
 Users must start a **new terminal** for env changes to take effect.
 

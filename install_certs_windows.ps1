@@ -4,7 +4,7 @@
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|pip|all   What to configure: npm, pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE), or all (default: all)
+#   -Package npm|pip|all   What to configure: npm, pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF Hub vars), or all (default: all)
 #   -CertName <pattern>    Substring to match cert subject (errors if 0 or >1 match). Requires -ExtractPath. Cannot be used with -UseCert.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each user's profile or absolute. Requires -CertName.
 #   -UseCert <path>        Path to an existing PEM cert file. Cannot be used with -CertName/-ExtractPath.
@@ -288,6 +288,9 @@ function Set-OtherUserEnvVars {
         if ($DoPip) {
             Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400" -Type String -Force
         }
     } finally {
         if ($weLoaded -and $tempKey) { & reg.exe unload "HKU\$tempKey" 2>&1 | Out-Null }
@@ -388,9 +391,13 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         if (DoPip) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $certPath, "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", "User")
         }
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
         Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
+        if (DoPip) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
     }
     # Only clear the other scope after new User vars are set (above); on failure we exit 1 before reaching here.
     # Extract = per-user cert; clear Machine-level cert vars so only User applies (avoids confusing duplication with old -UseCert).
@@ -401,6 +408,9 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
     if (DoPip) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
+        [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $null, "Machine")
+        [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", $null, "Machine")
+        [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $null, "Machine")
     }
     Write-Host "   + Cleared Machine-level cert vars so only User settings apply."
 }
@@ -418,7 +428,11 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
     if (DoPip) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", $envScope)
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $UseCert, $envScope)
+        [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", $envScope)
+        [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", $envScope)
+        [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", $envScope)
         Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $UseCert"
+        Write-Host "   + HF_HUB_DISABLE_XET and HF Hub timeouts set."
     }
     # Only clear the other scope after new vars are set above (so we never leave user with no cert vars on failure).
     # When setting Machine, remove User-level cert vars so they don't override (User wins over Machine on Windows).
@@ -430,6 +444,9 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         if (DoPip) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $null, "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", $null, "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $null, "User")
         }
         Write-Host "   + Cleared User-level cert vars so Machine settings apply."
     }

@@ -22,7 +22,8 @@
 #
 #   User's .zshrc gets these env vars (pointing at the PEM file):
 #     NODE_USE_SYSTEM_CA=1, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS=true,
-#     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE
+#     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE,
+#     HF_HUB_DISABLE_XET=1, HF_HUB_ETAG_TIMEOUT=86400, HF_HUB_DOWNLOAD_TIMEOUT=86400 (pip/Hugging Face Hub)
 #
 # After run, users need a new shell (or source ~/.zshrc) to pick up env vars.
 # To verify: run validate_install_macos.sh for current user,
@@ -60,7 +61,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [--package npm|pip|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|pip|all      Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), pip (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE), or both (default: all)"
+            echo "  --package npm|pip|all      Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), pip (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE, Hugging Face Hub vars), or both (default: all)"
             echo "  --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem as a full Keychain dump)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --extract-path)"
             echo "  --install-dependencies     Install openssl via Homebrew if missing, then continue"
@@ -223,6 +224,10 @@ add_exports_to_file() {
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
         fi
+        # Hugging Face Hub: corporate MITM / Artifactory redirect flows (no XET; longer timeouts).
+        ensure_export "$f" "HF_HUB_DISABLE_XET" "1"
+        ensure_export "$f" "HF_HUB_ETAG_TIMEOUT" "86400"
+        ensure_export "$f" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
     fi
 }
 
