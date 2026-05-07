@@ -115,7 +115,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
 
     # Invalid -Package
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
-    Assert-Stderr -Pattern "ValidateSet|npm|pip|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
+    Assert-Stderr -Pattern "ValidateSet|npm|python|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
 
     # -CertName without -ExtractPath (PowerShell requires both in set)
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
@@ -149,19 +149,19 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     }
 
     Write-Host ""
-    Write-Host "=== install_certs_windows.ps1 pip / UV_NATIVE_TLS + Hugging Face Hub flow ==="
+    Write-Host "=== install_certs_windows.ps1 Python / UV_NATIVE_TLS + Hugging Face Hub flow ==="
 
-    # -UseCert -Package pip: install sets Machine pip + HF Hub vars; verify and clean up
+    # -UseCert -Package python: install sets Machine Python + HF Hub vars; verify and clean up
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedHfXet = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
     $savedHfEtag = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
     $savedHfDl = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
     try {
-        $rPip = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "pip")
+        $rPy = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "python")
         $Run++
-        if ($rPip.ExitCode -ne 0) {
-            Write-Host "  FAIL ($Run): -UseCert -Package pip expected exit 0, got $($rPip.ExitCode)"
+        if ($rPy.ExitCode -ne 0) {
+            Write-Host "  FAIL ($Run): -UseCert -Package python expected exit 0, got $($rPy.ExitCode)"
             $script:Fail++
         } else {
             $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
@@ -170,7 +170,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $hfe = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfd = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
             if ($uv -eq "1" -and $req -eq $CertPath -and $hfx -eq "1" -and $hfe -eq "86400" -and $hfd -eq "86400") {
-                Write-Host "  OK ($Run): -Package pip sets UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF_HUB_*"
+                Write-Host "  OK ($Run): -Package python sets UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF_HUB_*"
                 $script:Pass++
             } else {
                 Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req' (expected '$CertPath'), HF xet/etag/dl='$hfx'/'$hfe'/'$hfd'"
@@ -185,7 +185,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $savedHfDl, "Machine")
     }
 
-    # -UseCert -Package all: verify npm and pip vars set (including HF Hub)
+    # -UseCert -Package all: verify npm and Python vars set (including HF Hub)
     $savedNode = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
     $savedNodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Install a custom CA certificate on Debian/Ubuntu and configure npm and/or pip
+# Install a custom CA certificate on Debian/Ubuntu and configure npm and/or Python
 # via environment variables.
 #
 # Run:
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|pip|all]
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|python|all]
 #
 # Examples:
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package npm
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package pip
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package python
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
 #
 # What it does:
@@ -23,7 +23,7 @@
 #   - Debian/Ubuntu only
 #   - Must run as root
 #   - npm uses the single installed custom cert
-#   - pip uses the full system CA bundle; sets REQUESTS_CA_BUNDLE, SSL_CERT_FILE, and HF_HUB_* (Hugging Face Hub)
+#   - Python uses the full system CA bundle; sets REQUESTS_CA_BUNDLE, SSL_CERT_FILE, and HF_HUB_* (Hugging Face Hub)
 #   - New terminals should pick up the env vars automatically
 
 set -euo pipefail
@@ -39,29 +39,29 @@ SYSTEM_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-cert <path> [--package npm|pip|all] [--cert-name <name>]
+  sudo $0 --use-cert <path> [--package npm|python|all] [--cert-name <name>]
 
 Options:
   --use-cert <path>       Path to an existing PEM/CRT certificate file
-  --package npm|pip|all   Configure npm, pip, or both (default: all)
+  --package npm|python|all   Configure npm, Python, or both (default: all)
   --cert-name <name>      Base name for installed cert (default: ${CERT_BASENAME})
   -h, --help              Show this help
 
 Examples:
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package npm
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package pip
+  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package python
   sudo $0 --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
 EOF
 }
 
 do_npm() { [[ "$PACKAGE" == "npm" || "$PACKAGE" == "all" ]]; }
-do_pip() { [[ "$PACKAGE" == "pip" || "$PACKAGE" == "all" ]]; }
+do_python() { [[ "$PACKAGE" == "python" || "$PACKAGE" == "all" ]]; }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-cert <path> [--package npm|pip|all]" >&2
+        echo "Use: sudo $0 --use-cert <path> [--package npm|python|all]" >&2
         exit 1
     fi
 }
@@ -94,9 +94,9 @@ parse_args() {
     done
 
     case "$PACKAGE" in
-        npm|pip|all) ;;
+        npm|python|all) ;;
         *)
-            echo "Error: --package must be npm, pip, or all (got: $PACKAGE)." >&2
+            echo "Error: --package must be npm, python, or all (got: $PACKAGE)." >&2
             exit 1
             ;;
     esac
@@ -191,7 +191,7 @@ write_profiled() {
             echo
         fi
 
-        if do_pip; then
+        if do_python; then
             echo "export REQUESTS_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
             echo "export HF_HUB_DISABLE_XET=1"
@@ -289,7 +289,7 @@ update_user_shell_rc() {
         ensure_export_in_file "$rc_file" "NODE_EXTRA_CA_CERTS" "$system_cert_path"
     fi
 
-    if do_pip; then
+    if do_python; then
         ensure_export_in_file "$rc_file" "REQUESTS_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "HF_HUB_DISABLE_XET" "1"
@@ -324,8 +324,8 @@ print_done() {
         echo
     fi
 
-    if do_pip; then
-        echo "pip/python environment:"
+    if do_python; then
+        echo "Python environment:"
         echo "  REQUESTS_CA_BUNDLE=$SYSTEM_CA_BUNDLE"
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
         echo "  HF_HUB_DISABLE_XET=1"
@@ -343,7 +343,7 @@ print_done() {
         echo "  env | grep NODE_EXTRA_CA_CERTS"
         echo "  npm i axios"
     fi
-    if do_pip; then
+    if do_python; then
         echo "  python3 -m venv .venv"
         echo "  source .venv/bin/activate"
         echo "  pip install requests"

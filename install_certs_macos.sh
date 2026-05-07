@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Export macOS Keychain CAs and configure Node/npm and/or pip for redirect-proxy usage.
+# Export macOS Keychain CAs and configure Node/npm and/or Python for redirect-proxy usage.
 # Run: sudo bash install_certs_macos.sh [OPTIONS]
 #
 # Options:
-#   --package npm|pip|all      What to configure: npm, pip, or both (default: all)
+#   --package npm|python|all What to configure: npm, Python, or both (default: all)
 #   --extract-path <path>      Path under each user's home for the PEM
 #                              (writes ~/<path>/package-route.pem). The PEM is a single
 #                              export of BOTH macOS Keychains (SystemRootCertificates +
@@ -23,7 +23,7 @@
 #   User's .zshrc gets these env vars (pointing at the PEM file):
 #     NODE_USE_SYSTEM_CA=1, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS=true,
 #     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE,
-#     HF_HUB_DISABLE_XET=1, HF_HUB_ETAG_TIMEOUT=86400, HF_HUB_DOWNLOAD_TIMEOUT=86400 (pip/Hugging Face Hub)
+#     HF_HUB_DISABLE_XET=1, HF_HUB_ETAG_TIMEOUT=86400, HF_HUB_DOWNLOAD_TIMEOUT=86400 (Python / Hugging Face Hub)
 #
 # After run, users need a new shell (or source ~/.zshrc) to pick up env vars.
 # To verify: run validate_install_macos.sh for current user,
@@ -59,9 +59,9 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--package npm|pip|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
+            echo "Usage: $0 [--package npm|python|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|pip|all      Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), pip (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE, Hugging Face Hub vars), or both (default: all)"
+            echo "  --package npm|python|all   Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), Python (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE, Hugging Face Hub vars), or both (default: all)"
             echo "  --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem as a full Keychain dump)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --extract-path)"
             echo "  --install-dependencies     Install openssl via Homebrew if missing, then continue"
@@ -80,9 +80,9 @@ done
 [ -z "$PACKAGE" ] && PACKAGE="all"
 
 case "$PACKAGE" in
-    npm|pip|all) ;;
+    npm|python|all) ;;
     *)
-        echo "Error: --package must be npm, pip, or all (got: $PACKAGE)." >&2
+        echo "Error: --package must be npm, python, or all (got: $PACKAGE)." >&2
         exit 1
         ;;
 esac
@@ -112,7 +112,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 do_npm() { [ "$PACKAGE" = "npm" ] || [ "$PACKAGE" = "all" ]; }
-do_pip() { [ "$PACKAGE" = "pip" ] || [ "$PACKAGE" = "all" ]; }
+do_python() { [ "$PACKAGE" = "python" ] || [ "$PACKAGE" = "all" ]; }
 
 # --install-dependencies: install openssl via Homebrew in this run so admins don't need a second pass.
 if [ "$INSTALL_DEPS" -eq 1 ] && ! command -v openssl >/dev/null 2>&1; then
@@ -215,7 +215,7 @@ add_exports_to_file() {
         fi
     fi
 
-    if do_pip; then
+    if do_python; then
         # UV_NATIVE_TLS (< 0.11.0) and UV_SYSTEM_CERTS (>= 0.11.0) both to "true" for compatibility.
         ensure_export "$f" "UV_NATIVE_TLS" "true"
         ensure_export "$f" "UV_SYSTEM_CERTS" "true"

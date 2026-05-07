@@ -1,10 +1,10 @@
 # (c) JFrog Ltd. (2026)
-# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or pip for Windows
+# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or Python for Windows
 # Run: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName Zscaler -ExtractPath Zscaler\npm
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|pip|all   What to configure: npm, pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF Hub vars), or all (default: all)
+#   -Package npm|python|all What to configure: npm, Python (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF Hub vars), or all (default: all)
 #   -CertName <pattern>    Substring to match cert subject (errors if 0 or >1 match). Requires -ExtractPath. Cannot be used with -UseCert.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each user's profile or absolute. Requires -CertName.
 #   -UseCert <path>        Path to an existing PEM cert file. Cannot be used with -CertName/-ExtractPath.
@@ -18,7 +18,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("npm", "pip", "all")]
+    [ValidateSet("npm", "python", "all")]
     [string]$Package = "all",
 
     [Parameter(ParameterSetName = "Extract", Mandatory = $true)]
@@ -44,7 +44,7 @@ if (-not ($isSystemContext -or $isAdmin)) {
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 function DoNpm { $Package -eq 'npm' -or $Package -eq 'all' }
-function DoPip { $Package -eq 'pip' -or $Package -eq 'all' }
+function DoPython { $Package -eq 'python' -or $Package -eq 'all' }
 
 # --- PEM helpers (align with macOS: validate, fingerprint, blocks, merge) ---
 
@@ -263,7 +263,7 @@ function Get-OtherUserEnvCertPaths {
 
 # Set User env vars for another user. If hive already loaded use HKU\<SID>; else load NTUSER.DAT.
 function Set-OtherUserEnvVars {
-    param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPip)
+    param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPython)
     $sid = Get-UserSidFromProfile -ProfilePath $ProfilePath
     $keyPath = $null
     $weLoaded = $false
@@ -285,7 +285,7 @@ function Set-OtherUserEnvVars {
             Set-ItemProperty -Path $keyPath -Name "NODE_USE_SYSTEM_CA" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -Value $CertPath -Type String -Force
         }
-        if ($DoPip) {
+        if ($DoPython) {
             Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
@@ -370,7 +370,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
                 Write-Host "[Error] Extracted PEM file is invalid: $certPath" -ForegroundColor Red
                 exit 1
             }
-            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPip:(DoPip)
+            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPython:(DoPython)
             Write-Host "   + $userHome : $certPath"
         }
     } else {
@@ -388,7 +388,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
             [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", "1", "User")
             [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $certPath, "User")
         }
-        if (DoPip) {
+        if (DoPython) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $certPath, "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
@@ -397,7 +397,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         }
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
         Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
-        if (DoPip) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
+        if (DoPython) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
     }
     # Only clear the other scope after new User vars are set (above); on failure we exit 1 before reaching here.
     # Extract = per-user cert; clear Machine-level cert vars so only User applies (avoids confusing duplication with old -UseCert).
@@ -405,7 +405,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "Machine")
     }
-    if (DoPip) {
+    if (DoPython) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $null, "Machine")
@@ -425,7 +425,7 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $UseCert, $envScope)
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
     }
-    if (DoPip) {
+    if (DoPython) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", $envScope)
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $UseCert, $envScope)
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", $envScope)
@@ -441,7 +441,7 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
             [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $null, "User")
             [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "User")
         }
-        if (DoPip) {
+        if (DoPython) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $null, "User")
