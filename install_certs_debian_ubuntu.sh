@@ -245,14 +245,6 @@ ensure_export_in_file() {
     fi
 }
 
-remove_hf_hub_exports_from_file() {
-    local file="$1"
-    [[ ! -f "$file" ]] && return 0
-    local tmp
-    tmp=$(mktemp)
-    grep -v -E '^export HF_HUB_(DISABLE_XET|ETAG_TIMEOUT|DOWNLOAD_TIMEOUT)=' "$file" > "$tmp" && mv "$tmp" "$file"
-}
-
 get_target_user() {
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         echo "$SUDO_USER"
@@ -312,8 +304,6 @@ update_user_shell_rc() {
         ensure_export_in_file "$rc_file" "HF_HUB_DISABLE_XET" "1"
         ensure_export_in_file "$rc_file" "HF_HUB_ETAG_TIMEOUT" "86400"
         ensure_export_in_file "$rc_file" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
-    elif do_python_tls; then
-        remove_hf_hub_exports_from_file "$rc_file"
     fi
 
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true

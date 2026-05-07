@@ -48,21 +48,6 @@ function DoNpm { $Package -eq 'npm' -or $Package -eq 'all' }
 function DoPythonTls { $Package -eq 'python' -or $Package -eq 'huggingface' -or $Package -eq 'all' }
 function DoHuggingface { $Package -eq 'huggingface' -or $Package -eq 'all' }
 
-function Clear-HfHubEnvVars {
-    param([string]$Scope)
-    foreach ($name in @('HF_HUB_DISABLE_XET', 'HF_HUB_ETAG_TIMEOUT', 'HF_HUB_DOWNLOAD_TIMEOUT')) {
-        [Environment]::SetEnvironmentVariable($name, $null, $Scope)
-    }
-}
-
-function Remove-HfHubRegistryProps {
-    param([string]$KeyPath)
-    if (-not (Test-Path -LiteralPath $KeyPath)) { return }
-    foreach ($name in @('HF_HUB_DISABLE_XET', 'HF_HUB_ETAG_TIMEOUT', 'HF_HUB_DOWNLOAD_TIMEOUT')) {
-        Remove-ItemProperty -Path $KeyPath -Name $name -ErrorAction SilentlyContinue
-    }
-}
-
 # --- PEM helpers (align with macOS: validate, fingerprint, blocks, merge) ---
 
 # Parse PEM file into list of PEM block strings (each between BEGIN/END CERTIFICATE).
@@ -310,8 +295,6 @@ function Set-OtherUserEnvVars {
             Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400" -Type String -Force
-        } elseif ($DoPythonTls) {
-            Remove-HfHubRegistryProps -KeyPath $keyPath
         }
     } finally {
         if ($weLoaded -and $tempKey) { & reg.exe unload "HKU\$tempKey" 2>&1 | Out-Null }
@@ -417,8 +400,6 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
             [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", "User")
-        } elseif (DoPythonTls) {
-            Clear-HfHubEnvVars User
         }
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
         if (DoPythonTls) {
@@ -435,7 +416,6 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
     if (DoPythonTls) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
-        Clear-HfHubEnvVars Machine
     }
     Write-Host "   + Cleared Machine-level cert vars so only User settings apply."
 }
@@ -459,8 +439,6 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
             [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", $envScope)
             [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", $envScope)
             Write-Host "   + HF_HUB_DISABLE_XET and HF Hub timeouts set."
-        } else {
-            Clear-HfHubEnvVars $envScope
         }
     }
     # Only clear the other scope after new vars are set above (so we never leave user with no cert vars on failure).
@@ -473,7 +451,6 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         if (DoPythonTls) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
-            Clear-HfHubEnvVars User
         }
         Write-Host "   + Cleared User-level cert vars so Machine settings apply."
     }

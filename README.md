@@ -178,7 +178,7 @@ Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation; **-UseCert -Package python** sets Python TLS only; **-Package huggingface** adds `HF_HUB_*`; **-Package all** sets npm + TLS + HF; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation; **-UseCert -Package python** sets Python TLS only and leaves existing `HF_HUB_*` unchanged; **-Package huggingface** adds `HF_HUB_*`; **-Package all** sets npm + TLS + HF; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (repo root).
 
@@ -193,7 +193,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Packages:** `-UseCert -Package python` sets TLS-only Machine vars; `-Package huggingface` adds `HF_HUB_*`; `-Package all` sets npm + TLS + HF. |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Packages:** `-UseCert -Package python` sets TLS-only Machine vars and does not remove pre-existing `HF_HUB_*`; `-Package huggingface` adds `HF_HUB_*`; `-Package all` sets npm + TLS + HF. |
 | **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message); system-level (Machine) env when run as admin. |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
@@ -256,7 +256,7 @@ For **Python TLS** (if `--package` is `python`, `huggingface`, or `all`):
 
 For **Hugging Face Hub** (if `--package` is `huggingface` or `all`):
 
-- Ensure `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`). If `--package` is **`python` only**, those exports are removed from `.zshrc` when present (stale values from a previous run).
+- Ensure `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`). With **`python` only**, those lines are **not** added or updated; any existing exports in `.zshrc` are left unchanged (so user or prior-run values are not stripped).
 
 Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 
@@ -286,7 +286,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 `install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the **invoking non-root user’s** shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
 
 - **npm:** `NODE_USE_SYSTEM_CA=1` and `NODE_EXTRA_CA_CERTS` pointing at the **installed** cert under `/usr/local/share/ca-certificates/` (default basename `package-route-custom-ca.crt`, overridable with `--cert-name`).
-- **Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows Python flows). **`HF_HUB_*`** are set only for **`huggingface` or `all`**.
+- **Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows Python flows). **`HF_HUB_*`** are set only for **`huggingface` or `all`**; with **`python` only**, existing `HF_HUB_*` lines in the user’s `~/.bashrc` / `~/.zshrc` are not removed.
 
 ### Requirements
 
@@ -385,7 +385,7 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 - **Admin required.** The script must be run as Administrator (or SYSTEM).
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
 - **Extract path:** per-user **package-route.pem** and User-level env per `-Package` (npm / Python TLS / Hugging Face as above); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** no PEM written; Machine-level env set per `-Package`; **`python`** does not set `HF_HUB_*` (and clears them on the target scope). User-level cert vars are **deleted** so only Machine applies when using `-UseCert` as admin.
+- **UseCert:** no PEM written; Machine-level env set per `-Package`; **`python`** does not set `HF_HUB_*` and does **not** clear pre-existing `HF_HUB_*` on the target scope. User-level cert vars are **deleted** so only Machine applies when using `-UseCert` as admin.
 
 Users must start a **new terminal** for env changes to take effect.
 

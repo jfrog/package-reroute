@@ -151,7 +151,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     Write-Host ""
     Write-Host "=== install_certs_windows.ps1 Python TLS vs Hugging Face Hub ==="
 
-    # -UseCert -Package python: UV + REQUESTS only; HF_* cleared on Machine
+    # -UseCert -Package python: TLS vars set; HF_* left unchanged on Machine
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedHfXet = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
@@ -169,11 +169,12 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $hfx = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
             $hfe = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfd = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
-            if ($uv -eq "1" -and $req -eq $CertPath -and [string]::IsNullOrEmpty($hfx) -and [string]::IsNullOrEmpty($hfe) -and [string]::IsNullOrEmpty($hfd)) {
-                Write-Host "  OK ($Run): -Package python sets UV_NATIVE_TLS and REQUESTS_CA_BUNDLE only (no HF_HUB_*)" 
+            $hfOk = ($hfx -eq $savedHfXet -and $hfe -eq $savedHfEtag -and $hfd -eq $savedHfDl)
+            if ($uv -eq "1" -and $req -eq $CertPath -and $hfOk) {
+                Write-Host "  OK ($Run): -Package python sets UV_NATIVE_TLS and REQUESTS_CA_BUNDLE; HF_HUB_* unchanged"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req' (expected '$CertPath'), HF xet/etag/dl='$hfx'/'$hfe'/'$hfd' (expected empty)"
+                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req' (expected '$CertPath'), HF xet/etag/dl='$hfx'/'$hfe'/'$hfd' (expected saved '$savedHfXet'/'$savedHfEtag'/'$savedHfDl')"
                 $script:Fail++
             }
         }

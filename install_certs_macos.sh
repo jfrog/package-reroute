@@ -200,15 +200,6 @@ ensure_export() {
     fi
 }
 
-# Remove Hugging Face Hub export lines (e.g. after switching from all/huggingface to python only).
-remove_hf_hub_exports_from_file() {
-    local f="$1"
-    [ ! -f "$f" ] && return 0
-    local tmp
-    tmp=$(mktemp "$SCRIPT_TMP/rmhf.XXXXXX")
-    grep -v -E '^export HF_HUB_(DISABLE_XET|ETAG_TIMEOUT|DOWNLOAD_TIMEOUT)=' "$f" > "$tmp" && cat "$tmp" > "$f" && rm -f "$tmp"
-}
-
 if [ -n "$USE_CERT" ]; then
     echo "[1/3] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
@@ -245,8 +236,6 @@ add_exports_to_file() {
         ensure_export "$f" "HF_HUB_DISABLE_XET" "1"
         ensure_export "$f" "HF_HUB_ETAG_TIMEOUT" "86400"
         ensure_export "$f" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
-    elif do_python_tls; then
-        remove_hf_hub_exports_from_file "$f"
     fi
 }
 
