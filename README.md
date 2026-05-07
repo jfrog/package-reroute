@@ -19,12 +19,12 @@ Environment variables by platform (see each section for details):
 |----------|-------------|--------|
 | `NODE_USE_SYSTEM_CA=1` | Node/npm | macOS, Debian, Windows when npm is configured |
 | `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | PEM path (bundle allowed) |
-| `UV_NATIVE_TLS=1` | Python **uv** | macOS and Windows **`--package python`** flows; **not** set by the Debian/Ubuntu script |
+| `UV_NATIVE_TLS=1` | Python **uv** | macOS and Windows when **`--package`** is **`python`**, **`huggingface`**, or **`all`**; **not** set by the Debian/Ubuntu script |
 | `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
-| `SSL_CERT_FILE=<path>` | OpenSSL-backed tools | Set on **Debian/Ubuntu** (`python` package) to the system CA bundle |
-| `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`python` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
-| `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`python` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
-| `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`python` or `all`**: download timeout (seconds) |
+| `SSL_CERT_FILE=<path>` | OpenSSL-backed tools | Set on **Debian/Ubuntu** for **`python`**, **`huggingface`**, or **`all`** to the system CA bundle |
+| `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
+| `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
+| `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: download timeout (seconds) |
 
 ---
 
@@ -61,7 +61,7 @@ sudo ./install_certs_macos.sh [OPTIONS]
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--package <npm\|python\|all>` | No (default: **all**) | What to configure: **npm** (Node), **python** (Python TLS, uv, Hugging Face Hub env vars), or **all**. |
+| `--package <npm\|python\|huggingface\|all>` | No (default: **all**) | **npm** (Node only), **python** (Python TLS: uv, requests—no Hugging Face Hub vars), **huggingface** (Python TLS + `HF_HUB_*`), **all** (npm + python + Hugging Face Hub). |
 | `--cert-name <pattern>` | Yes* | Regex pattern to match **exactly one** certificate in the Keychain (subject). Requires `--extract-path`. |
 | `--extract-path <path>` | Yes* | Directory **under each user’s home** where **package-route.pem** is written: `~/<path with leading / stripped>/package-route.pem` (e.g. `opt/certs` → `~/opt/certs/...`, `certs` → `~/certs/...`). Requires `--cert-name`. |
 | `--use-cert <path>` | Yes* | Use this existing PEM file instead of extracting from Keychain. Cannot be used with `--cert-name` / `--extract-path`. |
@@ -93,7 +93,7 @@ sudo ./install_certs_macos.sh \
   --use-cert /opt/certs/company-ca.pem
 ```
 
-**3. Only configure Python (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, Hugging Face Hub env vars)**
+**3. Only configure Python TLS** (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE; no `HF_HUB_*`)
 
 ```bash
 sudo ./install_certs_macos.sh \
@@ -104,7 +104,16 @@ sudo ./install_certs_macos.sh \
 
 With a relative `--extract-path`, each user gets their own file, e.g. `/Users/jane/certs/package-route.pem`.
 
-**4. Install openssl if missing, then run (single run)**
+**4. Python TLS + Hugging Face Hub** (`huggingface`; same TLS vars plus `HF_HUB_*`)
+
+```bash
+sudo ./install_certs_macos.sh \
+  --package huggingface \
+  --cert-name "My CA" \
+  --extract-path certs
+```
+
+**5. Install openssl if missing, then run (single run)**
 
 ```bash
 sudo ./install_certs_macos.sh \
@@ -162,14 +171,14 @@ Exit code 0 if all tests pass, 1 otherwise.
 
 | Area | Covered | Not covered |
 |------|--------|-------------|
-| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`python` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. **NODE_USE_SYSTEM_CA / UV_NATIVE_TLS ensure logic:** add if missing; replace if value ≠ 1; leave as-is if 1; idempotent (run twice → single line). | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
+| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`python`/`huggingface` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. **NODE_USE_SYSTEM_CA / UV_NATIVE_TLS ensure logic:** add if missing; replace if value ≠ 1; leave as-is if 1; idempotent (run twice → single line). | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
 | **validate_install_macos.sh** | **CLI:** unknown option (exit 1); missing `--expected-subject` (exit 1). **Main paths:** default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
 
 Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation, Python flow: **-UseCert -Package python** sets Machine `UV_NATIVE_TLS=1`, `REQUESTS_CA_BUNDLE`, and Hugging Face Hub vars; **-Package all** sets npm + Python vars including HF Hub; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation; **-UseCert -Package python** sets Python TLS only; **-Package huggingface** adds `HF_HUB_*`; **-Package all** sets npm + TLS + HF; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (repo root).
 
@@ -184,7 +193,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Python flow:** `-UseCert -Package python` sets Machine Python-related vars including `UV_NATIVE_TLS=1`, `REQUESTS_CA_BUNDLE`, and `HF_HUB_*`; `-UseCert -Package all` sets npm vars plus those Python/HF vars. |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Packages:** `-UseCert -Package python` sets TLS-only Machine vars; `-Package huggingface` adds `HF_HUB_*`; `-Package all` sets npm + TLS + HF. |
 | **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message); system-level (Machine) env when run as admin. |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
@@ -195,7 +204,7 @@ Tests are black-box (exit codes and stdout/stderr). Paths are passed to the vali
 
 #### 1. Argument handling
 
-- **--package** defaults to `all` if omitted; must be `npm`, `python`, or `all`.
+- **--package** defaults to `all` if omitted; must be `npm`, `python`, `huggingface`, or `all` (**all** = npm + Python TLS + Hugging Face Hub).
 - **Cert source** is one of:
   - **Extract:** `--cert-name` and `--extract-path` must both be set; `--use-cert` must not be set.
   - **Use file:** `--use-cert` set; `--cert-name` and `--extract-path` must not be set.
@@ -240,11 +249,14 @@ For **npm** (if `--package` is `npm` or `all`):
 - **If export already exists:** replace that line so it points to the **admin’s** cert path; ensure `NODE_USE_SYSTEM_CA=1` (add if missing, replace if value ≠ 1, leave if already 1).
 - **Merge PEMs:** read the **old** bundle file (previous path); append every cert from it into the **new** cert file, **except**: (1) certs with the same fingerprint as the one we’re installing, (2) certs already present in the new file (by fingerprint). So the new file ends up with: **our cert first**, then any other CAs from the old file that aren’t duplicates.
 
-For **Python** (if `--package` is `python` or `all`):
+For **Python TLS** (if `--package` is `python`, `huggingface`, or `all`):
 
 - Ensure `UV_NATIVE_TLS=1`: add if missing, replace if value ≠ 1, leave as-is if already 1.
 - Same idea for `REQUESTS_CA_BUNDLE`: add export if missing, or replace the path and merge the old bundle into the new cert file (again skipping duplicates by fingerprint).
-- Ensure Hugging Face Hub defaults: `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`).
+
+For **Hugging Face Hub** (if `--package` is `huggingface` or `all`):
+
+- Ensure `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`). If `--package` is **`python` only**, those exports are removed from `.zshrc` when present (stale values from a previous run).
 
 Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 
@@ -274,7 +286,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 `install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the **invoking non-root user’s** shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
 
 - **npm:** `NODE_USE_SYSTEM_CA=1` and `NODE_EXTRA_CA_CERTS` pointing at the **installed** cert under `/usr/local/share/ca-certificates/` (default basename `package-route-custom-ca.crt`, overridable with `--cert-name`).
-- **Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows Python flows). **`HF_HUB_*`** Hugging Face Hub variables are set when the `python` package is configured (same as other platforms).
+- **Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows Python flows). **`HF_HUB_*`** are set only for **`huggingface` or `all`**.
 
 ### Requirements
 
@@ -287,7 +299,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 | Option | Required | Description |
 |--------|----------|-------------|
 | `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT file. |
-| `--package npm\|python\|all` | No (default: **all**) | What to configure. |
+| `--package npm\|python\|huggingface\|all` | No (default: **all**) | What to configure. |
 | `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for the file installed under `/usr/local/share/ca-certificates/<name>.crt` (not a Keychain/subject pattern). |
 | `-h`, `--help` | — | Usage. |
 
@@ -296,6 +308,7 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 ```bash
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package npm
+sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package huggingface
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --cert-name my-org-ca
 ```
 
@@ -317,8 +330,8 @@ sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example
 `install_certs_windows.ps1` configures **Node/npm** and/or **Python** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
 - Either **extracts** a certificate from the Windows cert store (LocalMachine\Root) by **subject substring** (`-CertName`), or **uses an existing** PEM file you provide (**-UseCert**). If **multiple** certs match the pattern, the script logs a warning and picks one (prefers a subject containing `Root`, otherwise the first match).
-- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user (npm: `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`; Python: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`).
-- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** User-level cert vars (npm: `NODE_EXTRA_CA_CERTS`, `NODE_USE_SYSTEM_CA`; Python: `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`, `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`) so that only Machine settings apply (User would otherwise override Machine on Windows).
+- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user. **npm:** `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`. **Python TLS** (`python`, `huggingface`, or `all`): `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`. **Hugging Face Hub** (`huggingface` or `all`): `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`.
+- With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** overlapping **User**-level vars so they do not override Machine (User wins over Machine on Windows). Which vars are set or cleared depends on `-Package` (see env table above).
 
 Re-runs **merge** certs: if the target file already exists, the script saves its content, overwrites with the new cert, then appends other certs from the saved copy (dedupe by SHA-256 fingerprint). So running with a second cert adds it to the bundle instead of replacing it.
 
@@ -340,7 +353,7 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-Package` | No (default: **all**) | `npm`, `python`, or `all`. |
+| `-Package` | No (default: **all**) | `npm`, `python`, `huggingface`, or `all` (all = npm + Python TLS + Hugging Face Hub). |
 | `-CertName` | Yes* | Substring used to match cert **Subject** in the store (`*CertName*` wildcard). Requires `-ExtractPath`. Cannot be used with `-UseCert`. |
 | `-ExtractPath` | Yes* | Directory under each user’s profile for **package-route.pem** (rooted paths are normalized to a folder under the profile, same idea as macOS). Requires `-CertName`. |
 | `-UseCert` | Yes* | Path to an existing PEM file. Cannot be used with `-CertName` / `-ExtractPath`. |
@@ -371,8 +384,8 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 - **Admin required.** The script must be run as Administrator (or SYSTEM).
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
-- **Extract path:** per-user **package-route.pem** and User-level env (npm: NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS; Python: UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, HF_HUB_*); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** no PEM written; Machine-level env set (npm + Python vars per `-Package`, including HF Hub when Python is included); User-level cert vars are **deleted** so only Machine applies.
+- **Extract path:** per-user **package-route.pem** and User-level env per `-Package` (npm / Python TLS / Hugging Face as above); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
+- **UseCert:** no PEM written; Machine-level env set per `-Package`; **`python`** does not set `HF_HUB_*` (and clears them on the target scope). User-level cert vars are **deleted** so only Machine applies when using `-UseCert` as admin.
 
 Users must start a **new terminal** for env changes to take effect.
 

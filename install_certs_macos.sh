@@ -4,7 +4,10 @@
 # Run: sudo bash install_certs_macos.sh [OPTIONS]
 #
 # Options:
-#   --package npm|python|all What to configure: npm, Python, or both (default: all)
+#   --package npm|python|huggingface|all
+#     npm: Node only. python: Python TLS (uv, requests) only.
+#     huggingface: same as python plus Hugging Face Hub env vars.
+#     all: npm + python + huggingface.
 #   --extract-path <path>      Path under each user's home for the PEM
 #                              (writes ~/<path>/package-route.pem). The PEM is a single
 #                              export of BOTH macOS Keychains (SystemRootCertificates +
@@ -23,7 +26,7 @@
 #   User's .zshrc gets these env vars (pointing at the PEM file):
 #     NODE_USE_SYSTEM_CA=1, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS=true,
 #     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE,
-#     HF_HUB_DISABLE_XET=1, HF_HUB_ETAG_TIMEOUT=86400, HF_HUB_DOWNLOAD_TIMEOUT=86400 (Python / Hugging Face Hub)
+#     (for huggingface / all) HF_HUB_DISABLE_XET, HF_HUB_ETAG_TIMEOUT, HF_HUB_DOWNLOAD_TIMEOUT
 #
 # After run, users need a new shell (or source ~/.zshrc) to pick up env vars.
 # To verify: run validate_install_macos.sh for current user,
@@ -59,9 +62,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--package npm|python|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
+            echo "Usage: $0 [--package npm|python|huggingface|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|python|all   Configure npm (NODE_USE_SYSTEM_CA, NODE_EXTRA_CA_CERTS), Python (UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE, Hugging Face Hub vars), or both (default: all)"
+            echo "  --package npm|python|huggingface|all"
+            echo "                           npm: Node only. python: Python TLS (uv, requests). huggingface: python + Hugging Face Hub."
+            echo "                           all: npm + python + huggingface (default: all)"
             echo "  --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem as a full Keychain dump)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --extract-path)"
             echo "  --install-dependencies     Install openssl via Homebrew if missing, then continue"
@@ -80,9 +85,9 @@ done
 [ -z "$PACKAGE" ] && PACKAGE="all"
 
 case "$PACKAGE" in
-    npm|python|all) ;;
+    npm|python|huggingface|all) ;;
     *)
-        echo "Error: --package must be npm, python, or all (got: $PACKAGE)." >&2
+        echo "Error: --package must be npm, python, huggingface, or all (got: $PACKAGE)." >&2
         exit 1
         ;;
 esac
@@ -112,7 +117,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 do_npm() { [ "$PACKAGE" = "npm" ] || [ "$PACKAGE" = "all" ]; }
-do_python() { [ "$PACKAGE" = "python" ] || [ "$PACKAGE" = "all" ]; }
+do_python_tls() { [ "$PACKAGE" = "python" ] || [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
+do_huggingface() { [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
 
 # --install-dependencies: install openssl via Homebrew in this run so admins don't need a second pass.
 if [ "$INSTALL_DEPS" -eq 1 ] && ! command -v openssl >/dev/null 2>&1; then
@@ -194,6 +200,15 @@ ensure_export() {
     fi
 }
 
+# Remove Hugging Face Hub export lines (e.g. after switching from all/huggingface to python only).
+remove_hf_hub_exports_from_file() {
+    local f="$1"
+    [ ! -f "$f" ] && return 0
+    local tmp
+    tmp=$(mktemp "$SCRIPT_TMP/rmhf.XXXXXX")
+    grep -v -E '^export HF_HUB_(DISABLE_XET|ETAG_TIMEOUT|DOWNLOAD_TIMEOUT)=' "$f" > "$tmp" && cat "$tmp" > "$f" && rm -f "$tmp"
+}
+
 if [ -n "$USE_CERT" ]; then
     echo "[1/3] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
@@ -215,7 +230,7 @@ add_exports_to_file() {
         fi
     fi
 
-    if do_python; then
+    if do_python_tls; then
         # UV_NATIVE_TLS (< 0.11.0) and UV_SYSTEM_CERTS (>= 0.11.0) both to "true" for compatibility.
         ensure_export "$f" "UV_NATIVE_TLS" "true"
         ensure_export "$f" "UV_SYSTEM_CERTS" "true"
@@ -224,10 +239,14 @@ add_exports_to_file() {
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
         fi
+    fi
+    if do_huggingface; then
         # Hugging Face Hub: corporate MITM / Artifactory redirect flows (no XET; longer timeouts).
         ensure_export "$f" "HF_HUB_DISABLE_XET" "1"
         ensure_export "$f" "HF_HUB_ETAG_TIMEOUT" "86400"
         ensure_export "$f" "HF_HUB_DOWNLOAD_TIMEOUT" "86400"
+    elif do_python_tls; then
+        remove_hf_hub_exports_from_file "$f"
     fi
 }
 

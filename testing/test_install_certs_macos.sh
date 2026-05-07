@@ -78,7 +78,7 @@ echo "=== install_certs_macos.sh CLI tests ==="
 assert_exit 0 "'$INSTALL_SCRIPT' --help | head -1"
 assert_exit 1 "'$INSTALL_SCRIPT' --unknown 2>/dev/null"
 assert_exit 1 "'$INSTALL_SCRIPT' --package foo 2>/dev/null"
-assert_stderr "must be npm, python, or all" "'$INSTALL_SCRIPT' --package foo 2>&1"
+assert_stderr "must be npm, python, huggingface, or all" "'$INSTALL_SCRIPT' --package foo 2>&1"
 assert_exit 1 "'$INSTALL_SCRIPT' --package all 2>/dev/null"
 assert_stderr "either --extract-path or --use-cert" "'$INSTALL_SCRIPT' --package all 2>&1"
 assert_exit 1 "'$INSTALL_SCRIPT' --use-cert /nonexistent --extract-path /tmp 2>/dev/null"
@@ -93,12 +93,14 @@ if [ "$ARE_ROOT" -eq 0 ]; then
     assert_stderr "run as root|must be run as root" "'$INSTALL_SCRIPT' --use-cert '$TMP/cert.pem' 2>&1"
     assert_exit 1 "'$INSTALL_SCRIPT' --package npm --use-cert '$TMP/cert.pem' 2>/dev/null"
     assert_exit 1 "'$INSTALL_SCRIPT' --package python --use-cert '$TMP/cert.pem' 2>/dev/null"
+    assert_exit 1 "'$INSTALL_SCRIPT' --package huggingface --use-cert '$TMP/cert.pem' 2>/dev/null"
 else
     assert_exit 1 "'$INSTALL_SCRIPT' --use-cert /etc/hosts 2>/dev/null"
     assert_stderr "Invalid or missing PEM" "'$INSTALL_SCRIPT' --use-cert /etc/hosts 2>&1"
     assert_exit 0 "'$INSTALL_SCRIPT' --use-cert '$TMP/cert.pem' 2>/dev/null"
     assert_exit 0 "'$INSTALL_SCRIPT' --package npm --use-cert '$TMP/cert.pem' 2>/dev/null"
     assert_exit 0 "'$INSTALL_SCRIPT' --package python --use-cert '$TMP/cert.pem' 2>/dev/null"
+    assert_exit 0 "'$INSTALL_SCRIPT' --package huggingface --use-cert '$TMP/cert.pem' 2>/dev/null"
 fi
 
 # --use-cert with invalid PEM (file exists but not valid cert): rejected after root check. Test only when passwordless sudo available.
@@ -109,9 +111,10 @@ else
     echo "  SKIP: no passwordless sudo, skipping install_certs_macos.sh invalid PEM test"
 fi
 
-# --package npm/python without cert source: same error as --package all
+# --package npm/python/huggingface without cert source: same error as --package all
 assert_exit 1 "'$INSTALL_SCRIPT' --package npm 2>/dev/null"
 assert_exit 1 "'$INSTALL_SCRIPT' --package python 2>/dev/null"
+assert_exit 1 "'$INSTALL_SCRIPT' --package huggingface 2>/dev/null"
 
 echo ""
 echo "=== validate_install_macos.sh tests (temp PEM and mock home) ==="
