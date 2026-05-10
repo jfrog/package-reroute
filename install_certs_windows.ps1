@@ -1,10 +1,11 @@
 # (c) JFrog Ltd. (2026)
-# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or pip for Windows
+# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or Python for Windows
 # Run: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName Zscaler -ExtractPath Zscaler\npm
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|pip|all   What to configure: npm, pip (UV_NATIVE_TLS, REQUESTS_CA_BUNDLE), or all (default: all)
+#   -Package npm|python|huggingface|all
+#     npm / python / huggingface / all (all = npm + python TLS + Hugging Face Hub)
 #   -CertName <pattern>    Substring to match cert subject (errors if 0 or >1 match). Requires -ExtractPath. Cannot be used with -UseCert.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each user's profile or absolute. Requires -CertName.
 #   -UseCert <path>        Path to an existing PEM cert file. Cannot be used with -CertName/-ExtractPath.
@@ -18,7 +19,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("npm", "pip", "all")]
+    [ValidateSet("npm", "python", "huggingface", "all")]
     [string]$Package = "all",
 
     [Parameter(ParameterSetName = "Extract", Mandatory = $true)]
@@ -44,7 +45,8 @@ if (-not ($isSystemContext -or $isAdmin)) {
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 function DoNpm { $Package -eq 'npm' -or $Package -eq 'all' }
-function DoPip { $Package -eq 'pip' -or $Package -eq 'all' }
+function DoPythonTls { $Package -eq 'python' -or $Package -eq 'huggingface' -or $Package -eq 'all' }
+function DoHuggingface { $Package -eq 'huggingface' -or $Package -eq 'all' }
 
 # --- PEM helpers (align with macOS: validate, fingerprint, blocks, merge) ---
 
@@ -263,7 +265,7 @@ function Get-OtherUserEnvCertPaths {
 
 # Set User env vars for another user. If hive already loaded use HKU\<SID>; else load NTUSER.DAT.
 function Set-OtherUserEnvVars {
-    param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPip)
+    param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPythonTls, [bool]$DoHuggingface)
     $sid = Get-UserSidFromProfile -ProfilePath $ProfilePath
     $keyPath = $null
     $weLoaded = $false
@@ -285,9 +287,14 @@ function Set-OtherUserEnvVars {
             Set-ItemProperty -Path $keyPath -Name "NODE_USE_SYSTEM_CA" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -Value $CertPath -Type String -Force
         }
-        if ($DoPip) {
+        if ($DoPythonTls) {
             Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
             Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
+        }
+        if ($DoHuggingface) {
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400" -Type String -Force
         }
     } finally {
         if ($weLoaded -and $tempKey) { & reg.exe unload "HKU\$tempKey" 2>&1 | Out-Null }
@@ -367,7 +374,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
                 Write-Host "[Error] Extracted PEM file is invalid: $certPath" -ForegroundColor Red
                 exit 1
             }
-            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPip:(DoPip)
+            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoHuggingface:(DoHuggingface)
             Write-Host "   + $userHome : $certPath"
         }
     } else {
@@ -385,12 +392,20 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
             [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", "1", "User")
             [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $certPath, "User")
         }
-        if (DoPip) {
+        if (DoPythonTls) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $certPath, "User")
         }
+        if (DoHuggingface) {
+            [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", "User")
+            [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", "User")
+        }
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
-        Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
+        if (DoPythonTls) {
+            Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
+        }
+        if (DoHuggingface) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
     }
     # Only clear the other scope after new User vars are set (above); on failure we exit 1 before reaching here.
     # Extract = per-user cert; clear Machine-level cert vars so only User applies (avoids confusing duplication with old -UseCert).
@@ -398,7 +413,7 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "Machine")
     }
-    if (DoPip) {
+    if (DoPythonTls) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
     }
@@ -415,10 +430,16 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $UseCert, $envScope)
         Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
     }
-    if (DoPip) {
+    if (DoPythonTls) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", $envScope)
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $UseCert, $envScope)
         Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $UseCert"
+        if (DoHuggingface) {
+            [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", $envScope)
+            [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", $envScope)
+            [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", $envScope)
+            Write-Host "   + HF_HUB_DISABLE_XET and HF Hub timeouts set."
+        }
     }
     # Only clear the other scope after new vars are set above (so we never leave user with no cert vars on failure).
     # When setting Machine, remove User-level cert vars so they don't override (User wins over Machine on Windows).
@@ -427,7 +448,7 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
             [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $null, "User")
             [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $null, "User")
         }
-        if (DoPip) {
+        if (DoPythonTls) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
         }
