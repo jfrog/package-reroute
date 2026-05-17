@@ -28,6 +28,8 @@
 #     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE,
 #     (for huggingface / all) HF_HUB_DISABLE_XET, HF_HUB_ETAG_TIMEOUT, HF_HUB_DOWNLOAD_TIMEOUT
 #
+#   Best-effort Docker Hub credential cleanup for the target user.
+#
 # After run, users need a new shell (or source ~/.zshrc) to pick up env vars.
 # To verify: run validate_install_macos.sh for current user,
 # or sudo validate_install_macos.sh --all-users.
@@ -120,6 +122,14 @@ do_npm() { [ "$PACKAGE" = "npm" ] || [ "$PACKAGE" = "all" ]; }
 do_python_tls() { [ "$PACKAGE" = "python" ] || [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
 do_huggingface() { [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
 
+DOCKER_HUB_KEYS=(
+    "https://index.docker.io/v1/"
+    "index.docker.io"
+    "docker.io"
+    "https://registry-1.docker.io/"
+    "registry-1.docker.io"
+)
+
 # --install-dependencies: install openssl via Homebrew in this run so admins don't need a second pass.
 if [ "$INSTALL_DEPS" -eq 1 ] && ! command -v openssl >/dev/null 2>&1; then
     BREW=""
@@ -201,10 +211,10 @@ ensure_export() {
 }
 
 if [ -n "$USE_CERT" ]; then
-    echo "[1/3] Using existing certificate at $USE_CERT..."
+    echo "[1/4] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
 else
-    echo "[1/3] Preparing per-user PEM bundle (full Keychain export)..."
+    echo "[1/4] Preparing per-user PEM bundle (full Keychain export)..."
 fi
 
 # Writes/updates cert-related env vars in the user's .zshrc.
@@ -241,7 +251,7 @@ add_exports_to_file() {
 
 # --- Per-user loop ---
 
-echo "[2/3] Deploying cert bundle and env vars per user..."
+echo "[2/4] Deploying cert bundle and env vars per user..."
 
 for homedir in /Users/*; do
     [ "$homedir" = "/Users/Shared" ] && continue
@@ -301,7 +311,91 @@ for homedir in /Users/*; do
     fi
 done
 
-echo "[3/3] COMPLETE!"
+get_invoking_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        echo "$SUDO_USER"
+        return 0
+    fi
+
+    local console_user
+    console_user=$(stat -f '%Su' /dev/console 2>/dev/null || true)
+    if [ -n "$console_user" ] && [ "$console_user" != "root" ] && [ "$console_user" != "loginwindow" ]; then
+        echo "$console_user"
+        return 0
+    fi
+
+    logname 2>/dev/null || true
+}
+
+get_user_home() {
+    local user="$1"
+    local home
+    home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)
+    if [ -n "$home" ]; then
+        echo "$home"
+    else
+        echo "/Users/$user"
+    fi
+}
+
+locate_docker_binary() {
+    local candidate
+    for candidate in /usr/local/bin/docker /opt/homebrew/bin/docker; do
+        [ -x "$candidate" ] && { echo "$candidate"; return 0; }
+    done
+    command -v docker 2>/dev/null || true
+}
+
+run_as_invoking_user() {
+    local user="$1"
+    local home="$2"
+    local uid
+    shift 2
+
+    uid=$(id -u "$user" 2>/dev/null || true)
+    [ -z "$uid" ] && return 1
+
+    if command -v launchctl >/dev/null 2>&1; then
+        launchctl asuser "$uid" sudo -u "$user" env HOME="$home" "$@"
+    else
+        sudo -u "$user" env HOME="$home" "$@"
+    fi
+}
+
+cleanup_docker_credentials() {
+    local user home docker_bin key output
+
+    echo "[3/4] Clearing Docker Hub credentials for the target user..."
+
+    user="$(get_invoking_user)"
+    if [ -z "$user" ] || [ "$user" = "root" ]; then
+        echo "[warn] Skipping Docker credential cleanup: could not determine non-root target user." >&2
+        return 0
+    fi
+
+    home="$(get_user_home "$user")"
+    if [ -z "$home" ] || [ ! -d "$home" ]; then
+        echo "[warn] Skipping Docker credential cleanup: could not determine home for user $user." >&2
+        return 0
+    fi
+
+    docker_bin="$(locate_docker_binary)"
+    if [ -n "$docker_bin" ]; then
+        for key in "${DOCKER_HUB_KEYS[@]}"; do
+            if ! output="$(run_as_invoking_user "$user" "$home" "$docker_bin" logout "$key" 2>&1 >/dev/null)"; then
+                echo "[warn] docker logout '$key' failed for $user; continuing. $output" >&2
+            fi
+        done
+        echo "      Docker Hub credentials cleared (if any were present)."
+        return 0
+    fi
+
+    echo "      Docker CLI not found, skipping credential cleanup."
+}
+
+cleanup_docker_credentials
+
+echo "[4/4] COMPLETE!"
 echo ""
 if [ -n "$USE_CERT" ]; then
     echo "Using existing cert at $USE_CERT for all users."
