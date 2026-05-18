@@ -18,7 +18,7 @@
 #   2. Installs it into Debian/Ubuntu system trust store
 #   3. Runs update-ca-certificates
 #   4. Writes a managed file under /etc/profile.d
-#   5. Updates the invoking user's shell rc file (~/.zshrc or ~/.bashrc)
+#   5. Updates the target user's shell rc file (~/.zshrc or ~/.bashrc)
 #
 # Notes:
 #   - Debian/Ubuntu only
@@ -26,6 +26,7 @@
 #   - npm uses the single installed custom cert
 #   - Python TLS: REQUESTS_CA_BUNDLE, SSL_CERT_FILE (python / huggingface / all)
 #   - Hugging Face Hub: HF_HUB_* (huggingface or all)
+#   - Best-effort Docker Hub credential cleanup for the target user
 #   - New terminals should pick up the env vars automatically
 
 set -euo pipefail
@@ -61,6 +62,14 @@ EOF
 do_npm() { [[ "$PACKAGE" == "npm" || "$PACKAGE" == "all" ]]; }
 do_python_tls() { [[ "$PACKAGE" == "python" || "$PACKAGE" == "huggingface" || "$PACKAGE" == "all" ]]; }
 do_huggingface() { [[ "$PACKAGE" == "huggingface" || "$PACKAGE" == "all" ]]; }
+
+DOCKER_HUB_KEYS=(
+    "https://index.docker.io/v1/"
+    "index.docker.io"
+    "docker.io"
+    "https://registry-1.docker.io/"
+    "registry-1.docker.io"
+)
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
@@ -162,7 +171,7 @@ validate_pem() {
 install_system_cert() {
     local system_cert_path="$1"
 
-    echo "[1/4] Installing certificate into system trust store..."
+    echo "[1/5] Installing certificate into system trust store..."
 
     mkdir -p "$SYSTEM_CERT_DIR"
     cp "$USE_CERT" "$system_cert_path"
@@ -182,7 +191,7 @@ install_system_cert() {
 write_profiled() {
     local system_cert_path="$1"
 
-    echo "[2/4] Writing managed environment file to $PROFILED_FILE..."
+    echo "[2/5] Writing managed environment file to $PROFILED_FILE..."
 
     {
         echo "# Managed by install_certs_debian_ubuntu.sh"
@@ -248,8 +257,22 @@ ensure_export_in_file() {
 get_target_user() {
     if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
         echo "$SUDO_USER"
-    else
-        logname 2>/dev/null || true
+        return 0
+    fi
+
+    local login_user
+    login_user="$(logname 2>/dev/null || true)"
+    if [[ -n "$login_user" && "$login_user" != "root" ]]; then
+        echo "$login_user"
+        return 0
+    fi
+
+    if command -v loginctl >/dev/null 2>&1; then
+        loginctl list-sessions --no-legend 2>/dev/null | awk '
+            $2 >= 1000 && $3 != "root" && $4 == "seat0" { print $3; found=1; exit }
+            $2 >= 1000 && $3 != "root" && !fallback { fallback=$3 }
+            END { if (!found && fallback) print fallback }
+        '
     fi
 }
 
@@ -270,7 +293,7 @@ update_user_shell_rc() {
     target_user="$(get_target_user)"
 
     if [[ -z "$target_user" || "$target_user" == "root" ]]; then
-        echo "[3/4] Skipping user shell rc update: could not determine non-root invoking user."
+        echo "[3/5] Skipping user shell rc update: could not determine non-root target user."
         return 0
     fi
 
@@ -278,7 +301,7 @@ update_user_shell_rc() {
     user_shell="$(get_user_shell "$target_user")"
 
     if [[ -z "$user_home" || ! -d "$user_home" ]]; then
-        echo "[3/4] Skipping user shell rc update: could not determine home for user $target_user."
+        echo "[3/5] Skipping user shell rc update: could not determine home for user $target_user."
         return 0
     fi
 
@@ -287,7 +310,7 @@ update_user_shell_rc() {
         *)     rc_file="$user_home/.bashrc" ;;
     esac
 
-    echo "[3/4] Updating user shell rc file: $rc_file"
+    echo "[3/5] Updating user shell rc file: $rc_file"
 
     touch "$rc_file"
 
@@ -309,6 +332,59 @@ update_user_shell_rc() {
     chown "$target_user":"$target_user" "$rc_file" 2>/dev/null || true
 }
 
+locate_docker_binary() {
+    local candidate
+    for candidate in /usr/bin/docker /usr/local/bin/docker; do
+        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+    done
+    command -v docker 2>/dev/null || true
+}
+
+run_as_target_user() {
+    local target_user="$1"
+    local user_home="$2"
+    shift 2
+
+    if command -v runuser >/dev/null 2>&1; then
+        runuser -u "$target_user" -- env HOME="$user_home" "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -H -u "$target_user" env HOME="$user_home" "$@"
+    else
+        return 1
+    fi
+}
+
+cleanup_docker_credentials() {
+    local target_user user_home docker_bin key output
+
+    echo "[4/5] Clearing Docker Hub credentials for the target user..."
+
+    target_user="$(get_target_user)"
+    if [[ -z "$target_user" || "$target_user" == "root" ]]; then
+        echo "[warn] Skipping Docker credential cleanup: could not determine non-root target user." >&2
+        return 0
+    fi
+
+    user_home="$(get_user_home "$target_user")"
+    if [[ -z "$user_home" || ! -d "$user_home" ]]; then
+        echo "[warn] Skipping Docker credential cleanup: could not determine home for user $target_user." >&2
+        return 0
+    fi
+
+    docker_bin="$(locate_docker_binary)"
+    if [[ -n "$docker_bin" ]]; then
+        for key in "${DOCKER_HUB_KEYS[@]}"; do
+            if ! output="$(run_as_target_user "$target_user" "$user_home" "$docker_bin" logout "$key" 2>&1 >/dev/null)"; then
+                echo "[warn] docker logout '$key' failed for $target_user; continuing. $output" >&2
+            fi
+        done
+        echo "      Docker Hub credentials cleared (if any were present)."
+        return 0
+    fi
+
+    echo "      Docker CLI not found, skipping credential cleanup."
+}
+
 print_done() {
     local system_cert_path="$1"
     local target_user rc_hint
@@ -320,7 +396,7 @@ print_done() {
         rc_hint="new terminal for $target_user"
     fi
 
-    echo "[4/4] COMPLETE"
+    echo "[5/5] COMPLETE"
     echo
     echo "Installed certificate:"
     echo "  $system_cert_path"
@@ -349,7 +425,7 @@ print_done() {
 
     echo "Configuration written to:"
     echo "  $PROFILED_FILE"
-    echo "  invoking user's shell rc file"
+    echo "  target user's shell rc file"
     echo
     echo "Open a $rc_hint and validate:"
     if do_npm; then
@@ -377,6 +453,7 @@ main() {
     install_system_cert "$system_cert_path"
     write_profiled "$system_cert_path"
     update_user_shell_rc "$system_cert_path"
+    cleanup_docker_credentials
     print_done "$system_cert_path"
 }
 

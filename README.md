@@ -1,16 +1,16 @@
 # Certificate installation scripts
 
-Scripts to install a CA certificate and configure Node/npm and Python (pip, uv, Hugging Face Hub, and related TLS clients).
+Scripts to install a CA certificate, configure Node/npm and Python (pip, uv, Hugging Face Hub, and related TLS clients), and clear Docker Hub credentials that can break redirected Docker Hub pulls.
 
 This document describes the certificate installation and validation scripts for **macOS**, **Linux (Debian/Ubuntu)**, and **Windows**.
 
 | Script | Platform | Purpose |
 |--------|----------|---------|
-| **install_certs_macos.sh** | macOS | Install cert and set env vars (Node/Python) |
+| **install_certs_macos.sh** | macOS | Install cert, set env vars (Node/Python), and clear Docker Hub credentials |
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
-| **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc |
+| **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
-| **install_certs_windows.ps1** | Windows | Install cert and set env vars (Node/Python) |
+| **install_certs_windows.ps1** | Windows | Install cert, set env vars (Node/Python), and clear Docker Hub credentials |
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 
 Environment variables by platform (see each section for details):
@@ -19,12 +19,39 @@ Environment variables by platform (see each section for details):
 |----------|-------------|--------|
 | `NODE_USE_SYSTEM_CA=1` | Node/npm | macOS, Debian, Windows when npm is configured |
 | `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | PEM path (bundle allowed) |
-| `UV_NATIVE_TLS=1` | Python **uv** | macOS and Windows when **`--package`** is **`python`**, **`huggingface`**, or **`all`**; **not** set by the Debian/Ubuntu script |
+| `UV_NATIVE_TLS=true` / `1` | Python **uv** | macOS uses `true`; Windows uses `1`; **not** set by the Debian/Ubuntu script |
+| `UV_SYSTEM_CERTS=true` | Python **uv** | Set by macOS for **`python`**, **`huggingface`**, or **`all`** |
 | `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
 | `SSL_CERT_FILE=<path>` | OpenSSL-backed tools | Set on **Debian/Ubuntu** for **`python`**, **`huggingface`**, or **`all`** to the system CA bundle |
 | `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
 | `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
 | `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: download timeout (seconds) |
+
+---
+
+## Docker Hub credential cleanup
+
+Each install script includes a best-effort cleanup for Docker Hub credentials. This fixes environments where corporate egress redirects `registry-1.docker.io` to JFrog Artifactory: locally stored Docker Hub credentials can otherwise be sent to JFrog's token endpoint and produce `Bad Credentials`.
+
+The cleanup attempts `docker logout` for these Docker Hub key forms:
+
+```text
+https://index.docker.io/v1/
+index.docker.io
+docker.io
+https://registry-1.docker.io/
+registry-1.docker.io
+```
+
+If Docker CLI is unavailable, the scripts skip this step. The cleanup is idempotent, logs warnings on logout failures, and never aborts the certificate install.
+
+The cleanup runs in the user context where possible because Docker credentials and credential stores are user-scoped:
+
+- **macOS:** uses `SUDO_USER` when present; under JAMF/root execution, falls back to the console user from `/dev/console` and runs through `launchctl asuser`.
+- **Debian/Ubuntu:** uses `SUDO_USER`, then `logname`, then a best-effort active `loginctl` session fallback.
+- **Windows:** runs for the current PowerShell user. If the script runs as `SYSTEM`, Docker cleanup is skipped with a warning because the user's Docker credential store is not accessible from that context.
+
+Known limitation: Docker Desktop GUI sign-in can recreate CLI credentials later. If a user signed in through Docker Desktop, sign out in the Docker Desktop UI as well.
 
 ---
 
@@ -35,17 +62,18 @@ Environment variables by platform (see each section for details):
 `install_certs_macos.sh` configures **Node/npm** and/or **Python** on macOS to use a custom CA certificate (e.g. for corporate proxy or package routing). It:
 
 - Runs **only as root** (e.g. `sudo`).
-- Either **extracts** one certificate from the macOS Keychain (by name pattern) and writes it to a PEM file, or **uses an existing** PEM file you provide.
+- Either exports a full PEM bundle from macOS system Keychains, or **uses an existing** PEM file you provide.
 - For **each user** in `/Users/*`, writes or updates the certificate file and sets environment variables in that user’s `~/.zshrc` so Node and Python use the certificate.
+- Clears Docker Hub credentials for the target non-root user, when Docker is installed.
 
-With **Keychain extraction**, each user gets **package-route.pem** under `~/<extract-path>/`. With **`--use-cert`**, the install uses your PEM path as-is for every user.
+With **Keychain export**, each user gets **package-route.pem** under `~/<extract-path>/`. The bundle includes Apple's system roots and enterprise CAs from `/Library/Keychains/System.keychain`. With **`--use-cert`**, the install uses your PEM path as-is for every user.
 
 ### Requirements
 
-- **macOS** (script uses `security` for Keychain when extracting by cert name).
+- **macOS** (script uses `security` for Keychain export when `--extract-path` is used).
 - **Root** (script exits with an error and suggests `sudo` if not root).
 - **openssl** on `PATH`. Optional: use `--install-dependencies` to install it via Homebrew in the same run if missing.
-- When using **--cert-name**: the **security** (Keychain) tool must be available (system tool; `/usr/bin` is prepended to `PATH` by the script).
+- When using **--extract-path**: the **security** (Keychain) tool must be available (system tool; `/usr/bin` is prepended to `PATH` by the script).
 
 ---
 
@@ -62,24 +90,22 @@ sudo ./install_certs_macos.sh [OPTIONS]
 | Option | Required | Description |
 |--------|----------|-------------|
 | `--package <npm\|python\|huggingface\|all>` | No (default: **all**) | **npm** (Node only), **python** (Python TLS: uv, requests—no Hugging Face Hub vars), **huggingface** (Python TLS + `HF_HUB_*`), **all** (npm + python + Hugging Face Hub). |
-| `--cert-name <pattern>` | Yes* | Regex pattern to match **exactly one** certificate in the Keychain (subject). Requires `--extract-path`. |
-| `--extract-path <path>` | Yes* | Directory **under each user’s home** where **package-route.pem** is written: `~/<path with leading / stripped>/package-route.pem` (e.g. `opt/certs` → `~/opt/certs/...`, `certs` → `~/certs/...`). Requires `--cert-name`. |
-| `--use-cert <path>` | Yes* | Use this existing PEM file instead of extracting from Keychain. Cannot be used with `--cert-name` / `--extract-path`. |
+| `--extract-path <path>` | Yes* | Directory **under each user’s home** where **package-route.pem** is written: `~/<path with leading / stripped>/package-route.pem` (e.g. `opt/certs` → `~/opt/certs/...`, `certs` → `~/certs/...`). |
+| `--use-cert <path>` | Yes* | Use this existing PEM file instead of exporting from Keychain. Cannot be used with `--extract-path`. |
 | `--install-dependencies` | No | If **openssl** is missing, install it via Homebrew and continue in the same run. |
 | `-h`, `--help` | — | Print usage and exit. |
 
-\* You must use **either** (`--cert-name` and `--extract-path`) **or** `--use-cert`, not both and not neither.
+\* You must use **either** `--extract-path` **or** `--use-cert`, not both and not neither.
 
 #### Examples
 
-**1. Extract cert from Keychain and configure npm + Python for all users**
+**1. Export Keychain bundle and configure npm + Python for all users**
 
-Certificate subject must match the pattern (e.g. "My CA"). PEM is written under each user’s home (e.g. `~/opt/certs/package-route.pem` for `--extract-path /opt/certs`) and each user’s `.zshrc` is updated:
+PEM is written under each user’s home (e.g. `~/opt/certs/package-route.pem` for `--extract-path /opt/certs`) and each user’s `.zshrc` is updated:
 
 ```bash
 sudo ./install_certs_macos.sh \
   --package all \
-  --cert-name "My CA" \
   --extract-path /opt/certs
 ```
 
@@ -98,7 +124,6 @@ sudo ./install_certs_macos.sh \
 ```bash
 sudo ./install_certs_macos.sh \
   --package python \
-  --cert-name "My CA" \
   --extract-path certs
 ```
 
@@ -109,7 +134,6 @@ With a relative `--extract-path`, each user gets their own file, e.g. `/Users/ja
 ```bash
 sudo ./install_certs_macos.sh \
   --package huggingface \
-  --cert-name "My CA" \
   --extract-path certs
 ```
 
@@ -119,7 +143,6 @@ sudo ./install_certs_macos.sh \
 sudo ./install_certs_macos.sh \
   --install-dependencies \
   --package all \
-  --cert-name "My CA" \
   --extract-path /opt/certs
 ```
 
@@ -153,7 +176,7 @@ sudo ./validate_install_macos.sh --expected-subject Zscaler --all-users
 
 Tests live in **testing/**. Automated tests cover **macOS** and **Windows** only (not Debian/Ubuntu).
 
-**test_install_certs_macos.sh** runs automated tests for **install_certs_macos.sh** (CLI and argument validation), **validate_install_macos.sh** (validation with a temp PEM and mock home), fingerprint/merge logic (same fingerprint → dedupe, different fingerprint → append), and **NODE_USE_SYSTEM_CA** / **UV_NATIVE_TLS** ensure logic (add if missing, replace if value ≠ 1, leave as-is if 1). No root required.
+**test_install_certs_macos.sh** runs automated tests for **install_certs_macos.sh** (CLI and argument validation) and **validate_install_macos.sh** (validation with a temp PEM and mock home). No root required for the default test run.
 
 **Requirements:** `openssl` on `PATH` (for generating a temporary cert in tests).
 
@@ -171,7 +194,7 @@ Exit code 0 if all tests pass, 1 otherwise.
 
 | Area | Covered | Not covered |
 |------|--------|-------------|
-| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; `--cert-name` without `--extract-path` (and reverse); no cert source; `--use-cert` + `--cert-name` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`python`/`huggingface` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). **Fingerprint/merge (no root):** same fingerprint → one cert (dedupe); different fingerprint → both certs appended; `bundle_contains_pem` and merge logic exercised via test helpers. **NODE_USE_SYSTEM_CA / UV_NATIVE_TLS ensure logic:** add if missing; replace if value ≠ 1; leave as-is if 1; idempotent (run twice → single line). | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain extraction; per-user loop; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
+| **install_certs_macos.sh** | **CLI and pre-root:** `--help`; unknown option; invalid `--package`; no cert source; `--use-cert` + `--extract-path` conflict; `--use-cert` with missing file; non-root exit and message. **--use-cert:** valid PEM path and `--package npm`/`python`/`huggingface` (non-root → run as root); invalid PEM content rejected with "Invalid or missing PEM" when run as root (tested when passwordless sudo available). | **Post-root:** PATH/openssl, `--install-dependencies` (Homebrew); Keychain export; per-user loop; Docker credential cleanup; writing PEM and updating `.zshrc`. Requires root and/or Keychain; not run in CI. |
 | **validate_install_macos.sh** | **CLI:** unknown option (exit 1); missing `--expected-subject` (exit 1). **Main paths:** default with mock `HOME` and `.zshrc`; missing PEM in `.zshrc` (exit 1); `--all-users` without root (exit 1). Covers `validate_pem`, `get_export_path`, `validate_user_config`. | Multi-cert bundle in `validate_pem`; `--all-users` as root. |
 
 Tests are black-box (exit codes and stderr).
@@ -206,11 +229,10 @@ Tests are black-box (exit codes and stdout/stderr). Paths are passed to the vali
 
 - **--package** defaults to `all` if omitted; must be `npm`, `python`, `huggingface`, or `all` (**all** = npm + Python TLS + Hugging Face Hub).
 - **Cert source** is one of:
-  - **Extract:** `--cert-name` and `--extract-path` must both be set; `--use-cert` must not be set.
-  - **Use file:** `--use-cert` set; `--cert-name` and `--extract-path` must not be set.
+  - **Keychain export:** `--extract-path` set; `--use-cert` must not be set.
+  - **Use file:** `--use-cert` set; `--extract-path` must not be set.
 - Script exits with an error if:
-  - Only one of `--cert-name` / `--extract-path` is set, or
-  - Both extract and `--use-cert` are used, or
+  - Both `--extract-path` and `--use-cert` are used, or
   - Neither cert source is provided.
 
 #### 2. Root and dependencies
@@ -221,15 +243,14 @@ Tests are black-box (exit codes and stdout/stderr). Paths are passed to the vali
   - Tries Homebrew (`/opt/homebrew/bin/brew` or `/usr/local/bin/brew`).
   - Runs `brew install openssl`, then adds the new `openssl` to `PATH` and **continues** in the same run.
 - If `openssl` is still missing after that (or without the flag), script exits with an error.
-- If cert source is **extract** (`--cert-name`), script checks that `security` is available; if not, it exits (system tool, cannot be installed).
+- If cert source is **Keychain export** (`--extract-path`), script checks that `security` is available; if not, it exits (system tool, cannot be installed).
 
 #### 3. Certificate source
 
 - **--use-cert:** Validates the file with `openssl x509 -noout` and uses it as the certificate for all users. No Keychain access.
-- **--cert-name + --extract-path:**
-  - Reads system Keychains (`System.keychain`, `SystemRootCertificates.keychain`).
-  - Exports all certs, then filters by subject using the `--cert-name` regex.
-  - Requires **exactly one** match; errors if 0 or &gt;1. The matched cert is stored in memory as PEM.
+- **--extract-path:**
+  - Exports all trusted root CAs from `SystemRootCertificates.keychain` and `System.keychain`.
+  - Writes the full bundle to each user's `package-route.pem`.
 
 #### 4. Per-user loop
 
@@ -238,27 +259,27 @@ For each directory in `/Users/*` (skipping `Shared` and non-directories):
 - **Cert file path:**
   - If **--use-cert:** use that path for every user.
   - If **--extract-path:** use `<homedir>/<extract-path with leading / stripped>/package-route.pem` (e.g. `/opt/certs` → `~/opt/certs/package-route.pem`, `certs` → `~/certs/package-route.pem`). Script creates the directory, writes the PEM, and `chown`s to that user.
-- For each user that has a **~/.zshrc**, the script calls `add_exports_to_file` with that file and the user’s cert path.
+- For each user, the script creates `~/.zshrc` if needed, then calls `add_exports_to_file` with that file and the user’s cert path. If `~/.zshrc` is a directory, it skips that user with a warning.
 
-#### 5. add_exports_to_file (per user, per shell file)
+#### 5. Docker Hub credential cleanup
+
+After cert and shell config updates, the script runs Docker Hub credential cleanup as the target non-root user (`SUDO_USER`, or the console user under JAMF). It uses `docker logout` when Docker is available; otherwise it skips the cleanup.
+
+#### 6. add_exports_to_file (per user, per shell file)
 
 For **npm** (if `--package` is `npm` or `all`):
 
-- Read the first `export NODE_EXTRA_CA_CERTS=...` line (if any) and resolve the path (including `~`).
-- **If no existing export:** append a blank line, ensure `NODE_USE_SYSTEM_CA=1` (add if missing), and `export NODE_EXTRA_CA_CERTS="<cert_path>"`.
-- **If export already exists:** replace that line so it points to the **admin’s** cert path; ensure `NODE_USE_SYSTEM_CA=1` (add if missing, replace if value ≠ 1, leave if already 1).
-- **Merge PEMs:** read the **old** bundle file (previous path); append every cert from it into the **new** cert file, **except**: (1) certs with the same fingerprint as the one we’re installing, (2) certs already present in the new file (by fingerprint). So the new file ends up with: **our cert first**, then any other CAs from the old file that aren’t duplicates.
+- Ensure `NODE_USE_SYSTEM_CA=1`.
+- Add or replace `NODE_EXTRA_CA_CERTS` so it points at the selected cert path.
 
 For **Python TLS** (if `--package` is `python`, `huggingface`, or `all`):
 
-- Ensure `UV_NATIVE_TLS=1`: add if missing, replace if value ≠ 1, leave as-is if already 1.
-- Same idea for `REQUESTS_CA_BUNDLE`: add export if missing, or replace the path and merge the old bundle into the new cert file (again skipping duplicates by fingerprint).
+- Ensure `UV_NATIVE_TLS=true` and `UV_SYSTEM_CERTS=true`.
+- Add or replace `REQUESTS_CA_BUNDLE` so it points at the selected cert path.
 
 For **Hugging Face Hub** (if `--package` is `huggingface` or `all`):
 
 - Ensure `HF_HUB_DISABLE_XET=1`, `HF_HUB_ETAG_TIMEOUT=86400`, `HF_HUB_DOWNLOAD_TIMEOUT=86400` (same add/replace/leave-as-is behavior via `ensure_export`). With **`python` only**, those lines are **not** added or updated; any existing exports in `.zshrc` are left unchanged (so user or prior-run values are not stripped).
-
-Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 
 ---
 
@@ -271,9 +292,10 @@ Fingerprints are SHA-256 via `openssl x509 -fingerprint -sha256 -noout`.
 #### Summary (macOS)
 
 - **One run as root** (optionally with `--install-dependencies` to install openssl).
-- **One cert source:** either Keychain (--cert-name + --extract-path) or existing file (--use-cert).
+- **One cert source:** either Keychain export (`--extract-path`) or existing file (`--use-cert`).
 - **Per user:** PEM at `~/<extract-path>/package-route.pem` for each user (leading `/` on `--extract-path` is stripped); env vars in `~/.zshrc` point to that path. With `--use-cert`, the same PEM path is used for every user.
-- **If user already had a different path:** script replaces it with the admin’s path and merges other certs from the old file into the new one (no duplicate certs by fingerprint).
+- **If user already had a different env path:** script replaces it with the selected cert path.
+- **Docker:** clears Docker Hub credentials for the target user if Docker is installed.
 
 Users must open a **new terminal** (or `source ~/.zshrc`) for the new environment variables to take effect.
 
@@ -283,16 +305,18 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 ### Overview
 
-`install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the **invoking non-root user’s** shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
+`install_certs_debian_ubuntu.sh` installs a PEM/CRT into the **Debian/Ubuntu system trust store** (`update-ca-certificates`), writes a managed file under **`/etc/profile.d/package-route-certs.sh`**, and updates the target non-root user’s shell rc (`~/.zshrc` or `~/.bashrc`, depending on their login shell). It **only** supports an existing certificate file (**`--use-cert`**); there is no Keychain or cert-store extraction on Linux in this repo.
 
 - **npm:** `NODE_USE_SYSTEM_CA=1` and `NODE_EXTRA_CA_CERTS` pointing at the **installed** cert under `/usr/local/share/ca-certificates/` (default basename `package-route-custom-ca.crt`, overridable with `--cert-name`).
 - **Python TLS:** `REQUESTS_CA_BUNDLE` and `SSL_CERT_FILE` point at the **system** CA bundle (`/etc/ssl/certs/ca-certificates.crt`), which includes your CA after `update-ca-certificates`. **`UV_NATIVE_TLS` is not set** (unlike macOS/Windows Python flows). **`HF_HUB_*`** are set only for **`huggingface` or `all`**; with **`python` only**, existing `HF_HUB_*` lines in the user’s `~/.bashrc` / `~/.zshrc` are not removed.
+- **Docker:** best-effort Docker Hub credential cleanup runs for the target non-root user.
 
 ### Requirements
 
 - **Debian or Ubuntu** (script checks `/etc/os-release`).
 - **Root** (`sudo`).
 - **`openssl`** and **`update-ca-certificates`** on `PATH`.
+- Optional: **Docker CLI** for Docker Hub credential-store cleanup. If Docker CLI is missing, the cleanup step is skipped.
 
 ### Options
 
@@ -332,6 +356,7 @@ sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example
 - Either **extracts** a certificate from the Windows cert store (LocalMachine\Root) by **subject substring** (`-CertName`), or **uses an existing** PEM file you provide (**-UseCert**). If **multiple** certs match the pattern, the script logs a warning and picks one (prefers a subject containing `Root`, otherwise the first match).
 - With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user. **npm:** `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`. **Python TLS** (`python`, `huggingface`, or `all`): `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`. **Hugging Face Hub** (`huggingface` or `all`): `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`.
 - With **-UseCert:** does **not** write a PEM file; sets **Machine**-level env vars. The script **deletes** overlapping **User**-level vars so they do not override Machine (User wins over Machine on Windows). Which vars are set or cleared depends on `-Package` (see env table above).
+- Clears Docker Hub credentials for the current PowerShell user. When running as `SYSTEM`, this cleanup is skipped with a warning because it must run in the user's Windows session.
 
 Re-runs **merge** certs: if the target file already exists, the script saves its content, overwrites with the new cert, then appends other certs from the saved copy (dedupe by SHA-256 fingerprint). So running with a second cert adds it to the bundle instead of replacing it.
 
@@ -340,6 +365,7 @@ Re-runs **merge** certs: if the target file already exists, the script saves its
 - **Windows** with PowerShell.
 - **Run as Administrator** (or SYSTEM). The script checks and exits with an error if not elevated.
 - When using **-CertName:** at least one certificate in LocalMachine\Root must match; if several match, the script warns and selects one (see Overview).
+- Optional: **Docker Desktop / Docker CLI** for Docker Hub credential-store cleanup. If Docker CLI is missing, the cleanup step is skipped.
 
 ### How to use
 
@@ -386,6 +412,7 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 - **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
 - **Extract path:** per-user **package-route.pem** and User-level env per `-Package` (npm / Python TLS / Hugging Face as above); re-runs merge and dedupe by fingerprint. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
 - **UseCert:** no PEM written; Machine-level env set per `-Package`; **`python`** does not set `HF_HUB_*` and does **not** clear pre-existing `HF_HUB_*` on the target scope. User-level cert vars are **deleted** so only Machine applies when using `-UseCert` as admin.
+- **Docker:** clears Docker Hub credentials for the current PowerShell user. Run the script in the user's session for this step; `SYSTEM` cannot clean up the user's Docker credential store.
 
 Users must start a **new terminal** for env changes to take effect.
 
