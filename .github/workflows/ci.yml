@@ -27,3 +27,17 @@ jobs:
       - name: Run Windows tests
         shell: pwsh
         run: ./testing/test_install_certs_windows.ps1
+
+  test-linux-jvm:
+    name: Test (Linux JVM)
+    runs-on: ubuntu-latest
+    # No actions/setup-java here — unlike the macOS/Windows JVM jobs that
+    # exercise a single host JDK, this job runs a 4-distro Docker matrix
+    # (Ubuntu / Debian / RHEL / Amazon Linux) and installs a JDK *inside*
+    # each container. The host runner doesn't need a JDK; setting one up
+    # would only mask divergence in the per-distro keytool versions.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Linux JVM smoke matrix
+        run: ./testing/test_install_certs_jvm_linux.sh
