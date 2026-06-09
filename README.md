@@ -21,6 +21,9 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 |--------|----------|---------|
 | **install_certs_macos.sh** | macOS | Install cert, set env vars (Node/Python), and clear Docker Hub credentials |
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
+| **install_certs_jvm_macos.sh** | macOS (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS + per-user LaunchAgent setting `JAVA_TOOL_OPTIONS` |
+| **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (JKS subject + plist + `launchctl getenv`) |
+| **_jvm_macos_paths.sh** | macOS (JVM) | Shared constants sourced by both installer and validator. Not directly executable. |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
 | **install_certs_jvm_linux.sh** | Linux (JVM) | Install CA for Maven/Gradle/sbt/Ivy: RHEL family → `update-ca-trust extract` into system anchors; others → per-host JKS + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
@@ -319,6 +322,100 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 ---
 
+## macOS (JVM): install_certs_jvm_macos.sh
+
+### Overview
+
+`install_certs_jvm_macos.sh` wires a custom CA certificate into the JVM trust path on macOS so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_macos.sh` if you need those.
+
+Single path on macOS — there is no OS-trust fallback because macOS-specific `KeychainStore` is broken per [JDK-8321045](https://bugs.openjdk.org/browse/JDK-8321045). The script:
+
+1. Builds a per-user JKS truststore at `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks` containing only the customer CA.
+2. Writes a per-user LaunchAgent plist at `~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist` that calls `launchctl setenv JAVA_TOOL_OPTIONS=…` at `RunAtLoad`.
+3. Bootstraps the agent into `gui/<uid>` via `launchctl bootstrap` so the env var becomes available to every subsequently-launched GUI process (Dock-launched IntelliJ, JetBrains Toolbox, `open -a …`).
+
+The `~/.zshrc` / `~/.bash_profile` shortcut is deliberately NOT used: it silently fails for Dock-launched IDE builds because GUI apps don't read the shell's interactive init. The LaunchAgent is the only recipe verified to reach Dock-launched and `open`-launched GUI applications, which inherit `JAVA_TOOL_OPTIONS` from the launchd `gui/<uid>` domain. Terminal sessions inherit transitively because Terminal.app itself is launchd-spawned.
+
+### Requirements
+
+- **macOS**.
+- **Root** (`sudo`) — needed to chown per-user files and to bootstrap into other users' `gui/<uid>` domains under `--all-users`.
+- **`openssl`** on `PATH` (ships with macOS as LibreSSL; full OpenSSL via Homebrew also works).
+- **`keytool`** on `PATH` (provided by any JDK — Homebrew openjdk, Adoptium Temurin, JetBrains JBR, etc.).
+- macOS built-ins used by the installer (all preinstalled on supported macOS versions): `plutil` (LaunchAgent plist validation), `launchctl` (bootstrap into `gui/<uid>`), `dscl` (user / home lookup), `stat` (UID-based filtering under `--all-users`).
+
+### Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validation: parseable X.509, not expired, `CA:TRUE` in basicConstraints. Bundles emit a warning (only the first cert imports). |
+| `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for the JKS alias. Must match `[A-Za-z0-9._-]+`. Pass the same value to the validator (the validator matches by subject so this is informational unless multiple CAs coexist). |
+| `--all-users` | No | Iterate `/Users/*` and install the LaunchAgent + JKS for every account with UID ≥ 501. Default = only `SUDO_USER` (or the GUI console user under JAMF). |
+| `-h`, `--help` | — | Usage. |
+
+### Examples
+
+```bash
+# Single user (typical: install for the developer running sudo)
+sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem
+
+# Fleet onboarding (shared Mac with multiple accounts)
+sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem --all-users
+
+# Custom alias for the JKS
+sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+```
+
+### Validation: validate_certs_jvm_macos.sh
+
+**`--expected-subject` is required.** Per user, asserts:
+- JKS file exists at the per-user path.
+- `keytool -list -v` shows an `Owner:` line matching the substring (case-insensitive).
+- LaunchAgent plist exists and passes `plutil -lint`.
+- `launchctl getenv JAVA_TOOL_OPTIONS` in `gui/<uid>` returns the JKS path (warn-not-fail when the user is not in an active GUI session — the plist will load at next login).
+
+```bash
+./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler"
+sudo ./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
+```
+
+`--all-users` requires root (other users' `~/Library` is `0700`). Exit code 0 if all checks pass, 1 otherwise.
+
+### Caveats
+
+- **Already-running apps must be restarted.** macOS does not re-poll the launchd domain env on Cmd-Tab. Quit and relaunch IntelliJ / your IDE after install for the env var to take effect.
+- **Gradle Daemon caching.** Run `gradle --stop` after onboarding so the daemon re-reads `JAVA_TOOL_OPTIONS` at next start.
+- **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM startup prints this to stderr. CI parsers that strict-match empty-stderr need to tolerate it.
+- **`changeit` truststore password.** OpenJDK convention; *not* a secret. The JKS holds only public CA certificates and the password protects file integrity, not contents.
+- **JKS extends the JDK's bundled cacerts.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The installer copies `$JAVA_HOME/lib/security/cacerts` to `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks` first, then `keytool -importcert` appends the corporate CA. The resulting store has ~150 public roots **plus** the corporate one.
+- **`JAVA_TOOL_OPTIONS` inner quoting.** The JKS path lives under `~/Library/Application Support/` which contains a space; the JVM tokenises `JAVA_TOOL_OPTIONS` on whitespace and only honours embedded `"…"` grouping. The installer therefore writes `-Djavax.net.ssl.trustStore="<path>" -Djavax.net.ssl.trustStorePassword="changeit"` into the LaunchAgent plist so the literal quotes reach the JVM tokenizer. Older installs (pre-fix) that wrote the unquoted form produced a fatal `Unrecognized option` on every Dock-launched JVM.
+- **`gui/<uid>` domain only exists for logged-in GUI users.** Under `--all-users`, accounts that are not currently logged in get the plist installed but `launchctl bootstrap` is soft-skipped; launchd loads the plist automatically at their next login.
+- **JAMF / headless kiosk caveat.** On a Mac running JAMF policies *before* any user has logged in, `gui/<uid>` is not yet running, so `launchctl bootstrap gui/<uid>` either fails or loads into a non-running domain. The plist will load on first interactive login. For truly headless boxes (rack-mounted Mac mini build agents), pair this installer with a `/Library/LaunchDaemons` (system-scope) trust-bootstrap before the first user login, or run the installer interactively as part of provisioning.
+- **`KeychainStore` truststoreType is rejected.** Broken per JDK-8321045 — incomplete for `SystemRootCertificates.keychain`. No OS-trust fallback on macOS.
+- **`~/.zshrc` / `~/.bash_profile` are deliberately NOT touched.** They silently fail for Dock-launched IDE builds — see Overview.
+- **IntelliJ per-IDE SSL store** (`~/Library/Application Support/JetBrains/IntelliJIdea<ver>/ssl/cacerts`) is a different layer (plugin marketplace, VCS). Not configured by this script.
+
+### Testing
+
+`./testing/test_install_certs_jvm_macos.sh` runs the 9-invariant smoke matrix locally and on CI. Each run targets `SUDO_USER`'s per-user files and cleans up between cases via `trap EXIT`.
+
+```bash
+# Local
+sudo ./testing/test_install_certs_jvm_macos.sh
+```
+
+The same matrix runs on every push and pull request via `.github/workflows/ci.yml` (`test-macos-jvm` job).
+
+### Summary (macOS JVM)
+
+- **One run as root**, single cert source via `--use-cert`.
+- Per-user JKS at `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
+- Per-user LaunchAgent at `~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist` bootstrapped into `gui/<uid>`.
+- **Idempotent**, **re-runnable**, **JDK-version-agnostic**. New JDK installs do not require re-running the script.
+- Restart already-running apps; `gradle --stop` for the Gradle Daemon.
+
+---
+
 ## Linux (Debian/Ubuntu): install_certs_debian_ubuntu.sh
 
 ### Overview
@@ -568,6 +665,7 @@ On **push** and **pull request** to `main` or `master`, GitHub Actions runs:
 | Job | Runner | Command |
 |-----|--------|---------|
 | Test (macOS) | `macos-latest` | `sudo ./testing/test_install_certs_macos.sh` |
+| Test (macOS JVM) | `macos-latest` | `sudo ./testing/test_install_certs_jvm_macos.sh` |
 | Test (Windows) | `windows-latest` | `./testing/test_install_certs_windows.ps1` (PowerShell) |
 | Test (Linux JVM) | `ubuntu-latest` | `./testing/test_install_certs_jvm_linux.sh` |
 
