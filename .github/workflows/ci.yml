@@ -51,6 +51,21 @@ jobs:
         shell: pwsh
         run: ./testing/test_install_certs_windows.ps1
 
+  test-windows-jvm:
+    name: Test (Windows JVM)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run Windows JVM smoke matrix
+        shell: pwsh
+        run: ./testing/test_install_certs_jvm_windows.ps1
+
   test-linux-jvm:
     name: Test (Linux JVM)
     runs-on: ubuntu-latest
