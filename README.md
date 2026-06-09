@@ -31,6 +31,9 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **_jvm_linux_paths.sh** | Linux (JVM) | Shared constants dot-sourced by installer + validator. Not directly executable. |
 | **install_certs_windows.ps1** | Windows | Install cert, set env vars (Node/Python/Ruby), and clear Docker Hub credentials |
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
+| **install_certs_jvm_windows.ps1** | Windows (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS at `%LOCALAPPDATA%` + User-scope `JAVA_TOOL_OPTIONS` |
+| **validate_certs_jvm_windows.ps1** | Windows (JVM) | Validate JVM truststore install (JKS subject + User-scope env var) |
+| **_jvm_windows_paths.ps1** | Windows (JVM) | Shared constants dot-sourced by installer + validator. Not directly executable. |
 
 Environment variables by platform (see each section for details):
 
@@ -658,6 +661,88 @@ Use a substring from your CA subject as `<ca-subject-pattern>` (find it with `op
 
 ---
 
+## Windows (JVM): install_certs_jvm_windows.ps1
+
+### Overview
+
+`install_certs_jvm_windows.ps1` wires a custom CA certificate into the JVM trust path on Windows so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_windows.ps1` if you need those.
+
+Single path on Windows — there is no OS-trust fallback. `-Djavax.net.ssl.trustStoreType=Windows-ROOT` was historically broken under Gradle ([gradle/gradle#6584](https://github.com/gradle/gradle/issues/6584), fixed in Gradle 8.3) and remains less uniform than the JKS recipe across our supported toolchains. The script:
+
+1. Builds a per-user JKS truststore at `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks` containing only the customer CA.
+2. Sets `JAVA_TOOL_OPTIONS` at **User** scope via `[Environment]::SetEnvironmentVariable(…, 'User')`, which writes `HKCU\Environment` and broadcasts `WM_SETTINGCHANGE`. New JVM processes started after the broadcast inherit the env var; daemons and long-running IDEs need a fresh session.
+
+**No Administrator required** — the User scope writes to `HKCU\Environment` without elevation, and `%LOCALAPPDATA%` is per-user.
+
+### Requirements
+
+- **Windows** with PowerShell 5.1+.
+- **`keytool.exe`** reachable via `JAVA_HOME` (set by Adoptium / Corretto / Microsoft / Zulu installers and by `actions/setup-java`) or on `PATH`.
+- The cert's syntactic validation (parseable X.509, expiry, `CA:TRUE`) uses .NET's `System.Security.Cryptography.X509Certificates`, so **no `openssl` dependency** for the install path itself.
+
+### Parameters
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `-UseCert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validation: parseable X.509, not expired, and if the basicConstraints extension is present then `CA:TRUE` is required (a cert that omits the extension entirely is accepted — matches OpenSSL/keytool default behavior). Bundles emit a warning (only the first cert imports). |
+| `-CertName <name>` | No (default: `package-route-custom-ca`) | Alias under which the CA is stored inside the JKS. Cosmetic — affects only `keytool -list` output. JKS path and env var name are fixed per-user. Must match `[A-Za-z0-9._-]+`. |
+
+No `-AllUsers` (User-scope env var is per-user by construction; each developer runs the installer in their own session). No `-Mode` — we ship only the JKS + `JAVA_TOOL_OPTIONS` recipe; see Caveats for why Windows-ROOT is not exposed.
+
+### Examples
+
+```powershell
+# Single user
+powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseCert C:\tmp\ZscalerRoot.pem
+
+# Custom alias
+powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseCert C:\tmp\ca.pem -CertName zscaler-root
+```
+
+### Validation: validate_certs_jvm_windows.ps1
+
+**`-ExpectedSubject` is required.** Asserts:
+- JKS file exists at the per-user path.
+- `keytool -list -v` shows an `Owner:` line matching the substring (case-insensitive).
+- `[Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', 'User')` returns a value referencing the expected JKS path.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File validate_certs_jvm_windows.ps1 -ExpectedSubject "O=Zscaler"
+```
+
+Exit code 0 if all checks pass, 1 otherwise. Result line is qualified with a count of any non-fatal warnings.
+
+### Caveats
+
+- **New sessions only.** `WM_SETTINGCHANGE` reaches Explorer and a few shells but most JVM-launching processes (Gradle Daemon, IntelliJ, Maven via the wrapper) cache their environment at startup. Open a new PowerShell/cmd or log off/on after install.
+- **Gradle Daemon caching.** Run `gradle --stop` after onboarding so the daemon re-reads `JAVA_TOOL_OPTIONS` at next start.
+- **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM startup prints this to stderr. CI parsers that strict-match empty-stderr need to tolerate it.
+- **`changeit` truststore password.** OpenJDK convention; *not* a secret. The JKS holds only public CA certificates and the password protects file integrity, not contents.
+- **JKS extends the JDK's bundled cacerts.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The installer copies `$env:JAVA_HOME\lib\security\cacerts` to `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks` first, then `keytool -importcert` appends the corporate CA. The resulting store has ~150 public roots **plus** the corporate one.
+- **Windows-ROOT trustStoreType is excluded by design.** `-Djavax.net.ssl.trustStoreType=Windows-ROOT` would point JVMs at the system Trusted Root store directly. The Gradle Daemon stale-snapshot bug that historically made this unsafe (gradle/gradle#6584) was fixed in Gradle 8.3 via [gradle/gradle#25106](https://github.com/gradle/gradle/pull/25106), but we still ship only the JKS+`JAVA_TOOL_OPTIONS` recipe so that (a) the trust source is uniform across Linux/macOS/Windows, and (b) developers on Gradle < 8.3 are not silently affected. A future ticket could add a `-TrustStoreType Windows-ROOT` flag for organisations standardised on Gradle ≥ 8.3.
+- **Machine scope is excluded.** v1 is User-scope only. Fleet/Intune rollouts that need `HKLM\Environment` should re-run the script per user via a logon script or use a future `-Scope Machine` flag (separate ticket).
+- **`%USERPROFILE%\.gradle\jdks\`** is Gradle's auto-provisioned JDK location. It's covered for free because `JAVA_TOOL_OPTIONS` is read by *every* JVM the user launches, regardless of where the JDK came from — subject to the Gradle Daemon caveat above (the daemon caches its environment at startup, so a newly-provisioned toolchain JDK only picks up `JAVA_TOOL_OPTIONS` after `gradle --stop`).
+
+### Testing
+
+`./testing/test_install_certs_jvm_windows.ps1` runs the 10-invariant smoke matrix on `windows-latest` in CI and locally. Each run targets the current user's `%LOCALAPPDATA%` + `HKCU` and cleans up via try/finally.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File testing\test_install_certs_jvm_windows.ps1
+```
+
+The same matrix runs on every push and pull request via `.github/workflows/ci.yml` (`test-windows-jvm` job).
+
+### Summary (Windows JVM)
+
+- **No Administrator required.** Single cert source via `-UseCert`.
+- Per-user JKS at `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks`.
+- User-scope `JAVA_TOOL_OPTIONS` in `HKCU\Environment`, broadcast via `WM_SETTINGCHANGE`.
+- **Idempotent**, **re-runnable**, **JDK-version-agnostic** across currently-supported JDKs (JKS format is still read by JDK 8–25; a future JDK that drops JKS support would require an installer-side format bump). New JDK installs do not require re-running the script.
+- New sessions for activation; `gradle --stop` for the Gradle Daemon.
+
+---
+
 ## Continuous integration
 
 On **push** and **pull request** to `main` or `master`, GitHub Actions runs:
@@ -667,6 +752,7 @@ On **push** and **pull request** to `main` or `master`, GitHub Actions runs:
 | Test (macOS) | `macos-latest` | `sudo ./testing/test_install_certs_macos.sh` |
 | Test (macOS JVM) | `macos-latest` | `sudo ./testing/test_install_certs_jvm_macos.sh` |
 | Test (Windows) | `windows-latest` | `./testing/test_install_certs_windows.ps1` (PowerShell) |
+| Test (Windows JVM) | `windows-latest` | `./testing/test_install_certs_jvm_windows.ps1` (PowerShell) |
 | Test (Linux JVM) | `ubuntu-latest` | `./testing/test_install_certs_jvm_linux.sh` |
 
 There is no CI job for the Debian/Ubuntu scripts in this workflow.
