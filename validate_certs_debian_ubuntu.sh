@@ -5,8 +5,8 @@
 # Also checks /etc/profile.d/package-route-certs.sh when present.
 #
 # Run:
-#   bash validate_certs_debian_ubuntu.sh --expected-subject "O=Zscaler"
-#   sudo bash validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Zscaler"
+#   bash validate_certs_debian_ubuntu.sh --expected-subject "O=Example"
+#   sudo bash validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example"
 #
 # Exit 0 = all checks passed.
 

@@ -12,7 +12,7 @@
 #                              (writes ~/<path>/package-route.pem). The PEM is a single
 #                              export of BOTH macOS Keychains (SystemRootCertificates +
 #                              System) — includes Apple's system roots AND enterprise
-#                              CAs like Zscaler. Cannot be combined with --use-cert.
+#                              enterprise SSL inspection CAs. Cannot be combined with --use-cert.
 #   --use-cert <path>          Path to an already-existing PEM cert file. Sets env vars
 #                              to point at this file; does not touch the Keychain.
 #                              Cannot be combined with --extract-path.
@@ -270,13 +270,13 @@ for homedir in /Users/*; do
 
     if [ -z "$USE_CERT" ]; then
         # Export ALL trusted root CAs from BOTH macOS Keychains into a single PEM file.
-        # This includes Apple's system roots AND enterprise CAs (including Zscaler).
+        # This includes Apple's system roots AND enterprise CAs.
         #
         # Why the Keychains (NOT /etc/ssl/cert.pem):
         #   - /etc/ssl/cert.pem is STATIC (only updated with macOS version upgrades)
         #   - SystemRootCertificates.keychain is DYNAMICALLY updated by Apple trust
         #     store updates, independent of macOS upgrades (~20-30 more CAs)
-        #   - System.keychain includes enterprise CAs deployed via MDM (e.g., Zscaler)
+        #   - System.keychain includes enterprise CAs deployed via MDM
         security find-certificate -a -p \
             /System/Library/Keychains/SystemRootCertificates.keychain \
             /Library/Keychains/System.keychain \

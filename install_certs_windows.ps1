@@ -1,6 +1,6 @@
 # (c) JFrog Ltd. (2026)
 # Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or Python for Windows
-# Run: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName Zscaler -ExtractPath Zscaler\npm
+# Run: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
