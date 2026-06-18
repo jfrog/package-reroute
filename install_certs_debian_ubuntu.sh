@@ -7,11 +7,11 @@
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|python|huggingface|all]
 #
 # Examples:
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package npm
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package python
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --package huggingface
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package npm
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package python
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package huggingface
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --cert-name my-org-ca
 #
 # What it does:
 #   1. Validates the provided PEM/CRT certificate
@@ -51,11 +51,11 @@ Options:
   -h, --help              Show this help
 
 Examples:
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package npm
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package python
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --package huggingface
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+  sudo $0 --use-cert /tmp/company-ca.pem
+  sudo $0 --use-cert /tmp/company-ca.pem --package npm
+  sudo $0 --use-cert /tmp/company-ca.pem --package python
+  sudo $0 --use-cert /tmp/company-ca.pem --package huggingface
+  sudo $0 --use-cert /tmp/company-ca.pem --cert-name my-org-ca
 EOF
 }
 

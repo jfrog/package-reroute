@@ -162,12 +162,14 @@ sudo ./install_certs_macos.sh \
 
 **Exit code:** 0 if all checks pass, 1 if any check fails.
 
+Use a substring from your CA subject as `<ca-subject-pattern>` (find it with `openssl x509 -in <pem> -noout -subject`).
+
 ```bash
 # After install: validate current user’s config and cert path(s)
-./validate_install_macos.sh --expected-subject Zscaler
+./validate_install_macos.sh --expected-subject "<ca-subject-pattern>"
 
 # Validate every user’s config (run as root)
-sudo ./validate_install_macos.sh --expected-subject Zscaler --all-users
+sudo ./validate_install_macos.sh --expected-subject "<ca-subject-pattern>" --all-users
 ```
 
 ---
@@ -372,7 +374,7 @@ Re-runs **merge** certs: if the target file already exists, the script saves its
 Run from a directory that contains the script (or use full path):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName Zscaler -ExtractPath certs\npm
+powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
 # Or use an existing PEM:
 powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 ```
@@ -391,7 +393,7 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 **Extract from store and configure all users (run as admin):**
 
 ```powershell
-.\install_certs_windows.ps1 -Package all -CertName Zscaler -ExtractPath certs\npm
+.\install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
 ```
 
 **Use an existing PEM (Machine-level env; User-level cert vars are deleted):**
@@ -430,12 +432,14 @@ Users must start a **new terminal** for env changes to take effect.
 
 **Exit code:** 0 if all checks passed, 1 if any check failed.
 
+Use a substring from your CA subject as `<ca-subject-pattern>` (find it with `openssl x509 -in <pem> -noout -subject`).
+
 ```powershell
 # After install: validate current user's env and cert path(s)
-.\validate_install_windows.ps1 -ExpectedSubject Zscaler
+.\validate_install_windows.ps1 -ExpectedSubject "<ca-subject-pattern>"
 
 # Validate every user's config (run as Administrator)
-.\validate_install_windows.ps1 -ExpectedSubject Zscaler -AllUsers
+.\validate_install_windows.ps1 -ExpectedSubject "<ca-subject-pattern>" -AllUsers
 ```
 
 ---

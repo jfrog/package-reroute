@@ -357,7 +357,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
 
     # Subject mismatch
     $Run++
-    $r3 = Invoke-ValidateWithEnvPath -Path $CertPath -ExpectedSubject "Zscaler"
+    $r3 = Invoke-ValidateWithEnvPath -Path $CertPath -ExpectedSubject "wrong-subject"
     if ($r3.ExitCode -eq 1) { Write-Host "  OK ($Run): exit 1"; $script:Pass++ } else { Write-Host "  FAIL ($Run): expected exit 1, got $($r3.ExitCode)"; $script:Fail++ }
     $Run++
     if (($r3.Stdout + " " + $r3.Stderr) -match "no cert|matching|FAIL|subject|Result:.*failed") { Write-Host "  OK ($Run): output matches"; $script:Pass++ } else { Write-Host "  FAIL ($Run): output did not match"; $script:Fail++ }
