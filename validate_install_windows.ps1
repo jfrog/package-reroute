@@ -92,7 +92,7 @@ function Validate-Pem {
 # Get effective cert paths for current user (User overrides Machine on Windows).
 function Get-CurrentUserCertPaths {
     $paths = @()
-    foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE")) {
+    foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")) {
         $val = [Environment]::GetEnvironmentVariable($var, "User")
         if ([string]::IsNullOrWhiteSpace($val)) { $val = [Environment]::GetEnvironmentVariable($var, "Machine") }
         if (-not [string]::IsNullOrWhiteSpace($val)) {
@@ -136,7 +136,8 @@ function Get-OtherUserCertPaths {
         if (Test-Path -LiteralPath $keyPath) {
             $nodePath = (Get-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -ErrorAction SilentlyContinue).NODE_EXTRA_CA_CERTS
             $pipPath = (Get-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -ErrorAction SilentlyContinue).REQUESTS_CA_BUNDLE
-            foreach ($p in @($nodePath, $pipPath)) {
+            $sslPath = (Get-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -ErrorAction SilentlyContinue).SSL_CERT_FILE
+            foreach ($p in @($nodePath, $pipPath, $sslPath)) {
                 if (-not [string]::IsNullOrWhiteSpace($p)) {
                     $p = $p.Trim().Trim('"').Trim("'")
                     if ($p -and $paths -notcontains $p) { $paths += $p }
@@ -163,7 +164,7 @@ if ($AllUsers) {
         $userHome = $ud.FullName
         $paths = Get-OtherUserCertPaths -ProfilePath $userHome
         if ($paths.Count -eq 0) {
-            Write-Host "  SKIP: user $($ud.Name) has no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE set"
+            Write-Host "  SKIP: user $($ud.Name) has no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE set"
             continue
         }
         Write-Host "  Checking user $($ud.Name)..."
@@ -175,7 +176,7 @@ if ($AllUsers) {
     Write-Host "Validating current user config (env) and cert path(s)..."
     $paths = Get-CurrentUserCertPaths
     if ($paths.Count -eq 0) {
-        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE set for current user"
+        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE set for current user"
     } else {
         foreach ($p in $paths) {
             Validate-Pem -Path $p | Out-Null
