@@ -3,7 +3,8 @@
 # Docker-driven smoke test matrix for Linux JVM trust installers.
 #
 # Runs:
-#   - generic Linux bundled-JKS flow on Debian/Ubuntu/Amazon Linux
+#   - generic Linux bundled-JKS flow on Debian/Ubuntu/Amazon Linux, using
+#     build_jvm_truststore_linux.sh to create the installer input
 #   - RHEL update-ca-trust PEM flow on UBI/RHEL
 
 set -euo pipefail
@@ -31,34 +32,10 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 
 useradd -m -s /bin/bash devx >/dev/null 2>&1 || true
 
-find_jdk_cacerts() {
-    if [[ -n "${JAVA_HOME:-}" && -f "${JAVA_HOME}/lib/security/cacerts" ]]; then
-        echo "${JAVA_HOME}/lib/security/cacerts"
-        return 0
-    fi
-    local keytool_path keytool_dir
-    keytool_path="$(command -v keytool 2>/dev/null || true)"
-    if [[ -n "$keytool_path" ]]; then
-        keytool_dir="$(dirname "$(readlink -f "$keytool_path" 2>/dev/null || echo "$keytool_path")")"
-        if [[ -f "${keytool_dir}/../lib/security/cacerts" ]]; then
-            echo "${keytool_dir}/../lib/security/cacerts"
-            return 0
-        fi
-    fi
-    fail "cannot locate JDK cacerts for bundled truststore fixture"
-}
-
 build_bundle_truststore() {
-    local src_cacerts
-    src_cacerts="$(find_jdk_cacerts)"
-    cp "$src_cacerts" /tmp/bundled-truststore.jks
-    chmod 0644 /tmp/bundled-truststore.jks
-    keytool -importcert -noprompt \
-        -alias package-route-custom-ca \
-        -file /tmp/ca.pem \
-        -keystore /tmp/bundled-truststore.jks \
-        -storepass changeit >/dev/null
-    echo "bundle base: $src_cacerts"
+    ./build_jvm_truststore_linux.sh \
+        --use-cert /tmp/ca.pem \
+        --output /tmp/bundled-truststore.jks >/dev/null
 }
 
 run_generic() {
@@ -108,7 +85,7 @@ run_generic() {
     echo "=== generic: JKS preserves bundled public roots ==="
     alias_count="$(keytool -list -keystore /etc/ssl/package-route-jvm/truststore.jks -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
     [[ "${alias_count:-0}" -ge 100 ]] || fail "truststore has $alias_count aliases; expected >= 100"
-    keytool -list -keystore /etc/ssl/package-route-jvm/truststore.jks -storepass changeit 2>/dev/null \
+    keytool -list -v -keystore /etc/ssl/package-route-jvm/truststore.jks -storepass changeit 2>/dev/null \
         | grep -qi 'digicert' \
         || fail "truststore is missing the DigiCert family of public roots"
     echo "  ok ($alias_count aliases)"
@@ -184,7 +161,7 @@ chmod +x "$PROBE"
 MATRIX=(
     "ubuntu|generic|ubuntu:22.04|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates default-jdk-headless >/dev/null"
     "debian|generic|debian:12|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates default-jdk-headless >/dev/null"
-    "amazonlinux|generic|amazonlinux:2023|dnf install -y -q java-21-amazon-corretto-headless openssl shadow-utils >/dev/null"
+    "amazonlinux|generic|amazonlinux:2023|dnf install -y -q java-21-amazon-corretto-headless openssl shadow-utils ca-certificates >/dev/null"
     "rhel|rhel|redhat/ubi9:latest|dnf install -y -q java-21-openjdk-headless openssl shadow-utils >/dev/null"
 )
 

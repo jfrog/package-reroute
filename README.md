@@ -23,8 +23,10 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
 | **install_certs_jvm_macos.sh** | macOS (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS + per-user LaunchAgent setting `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (JKS subject + plist + `launchctl getenv`) |
+| **build_jvm_truststore_macos.sh** | macOS (JVM) | Build installer-ready JKS from macOS system roots plus a supplied PEM CA |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
+| **build_jvm_truststore_linux.sh** | Linux (JVM) | Build installer-ready JKS from Linux system CA bundle plus a supplied PEM CA |
 | **install_certs_jvm_linux.sh** | Linux (JVM) | Install bundled JVM truststore: JKS at `/etc/ssl/package-route-jvm/truststore.jks` + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
 | **validate_certs_jvm_linux.sh** | Linux (JVM) | Validate bundled JVM truststore install (JKS subject + `/etc/environment` + shell-rc) |
 | **install_certs_jvm_rhel.sh** | RHEL (JVM) | Install PEM into RHEL-family system trust via `update-ca-trust extract` |
@@ -33,6 +35,7 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 | **install_certs_jvm_windows.ps1** | Windows (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS at `%LOCALAPPDATA%` + User-scope `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_windows.ps1** | Windows (JVM) | Validate JVM truststore install (JKS subject + User-scope env var) |
+| **build_jvm_truststore_windows.ps1** | Windows (JVM) | Build installer-ready JKS from Windows LocalMachine roots plus a supplied PEM CA |
 
 Environment variables by platform (see each section for details):
 
@@ -391,6 +394,18 @@ sudo ./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
 - **`~/.zshrc` / `~/.bash_profile` are deliberately NOT touched.** They silently fail for Dock-launched IDE builds — see Overview.
 - **IntelliJ per-IDE SSL store** (`~/Library/Application Support/JetBrains/IntelliJIdea<ver>/ssl/cacerts`) is a different layer (plugin marketplace, VCS). Not configured by this script.
 
+### Building the bundled truststore
+
+`build_jvm_truststore_macos.sh` creates the `--use-truststore` input for the installer. It exports macOS system certificates from the system keychains, imports them into a JKS truststore, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+
+```bash
+./build_jvm_truststore_macos.sh \
+  --use-cert /tmp/ZscalerRoot0.pem \
+  --output /tmp/package-route-truststore.jks
+
+sudo ./install_certs_jvm_macos.sh --use-truststore /tmp/package-route-truststore.jks
+```
+
 ### Testing
 
 `./testing/test_install_certs_jvm_macos.sh` runs the 9-invariant smoke matrix locally and on CI. Each run targets `SUDO_USER`'s per-user files and cleans up between cases via `trap EXIT`.
@@ -404,7 +419,7 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 
 ### Summary (macOS JVM)
 
-- **One run as root**, single cert source via `--use-cert`.
+- **One run as root**, single truststore source via `--use-truststore`.
 - Per-user JKS at `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
 - Per-user LaunchAgent at `~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist` bootstrapped into `gui/<uid>`.
 - **Idempotent**, **re-runnable**, **JDK-version-agnostic**. New JDK installs do not require re-running the script.
@@ -471,6 +486,20 @@ This generic Linux script always uses the JKS + `JAVA_TOOL_OPTIONS` recipe:
 3. Updates the invoking developer user's `.bashrc` or `.zshrc` when a non-root user can be determined.
 
 RHEL-family hosts that intentionally use Red Hat OpenJDK system trust should use `install_certs_jvm_rhel.sh` instead.
+
+### Building the bundled truststore
+
+`build_jvm_truststore_linux.sh` creates the `--use-truststore` input for the generic Linux installer. It imports certificates from the host Linux system CA bundle, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+
+```bash
+./build_jvm_truststore_linux.sh \
+  --use-cert /tmp/ZscalerRoot0.pem \
+  --output /tmp/package-route-truststore.jks
+
+sudo ./install_certs_jvm_linux.sh --use-truststore /tmp/package-route-truststore.jks
+```
+
+If the host uses a non-standard CA bundle path, pass `--system-bundle <path>`.
 
 ### Requirements
 
@@ -570,6 +599,7 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 
 - Use `install_certs_jvm_linux.sh` for bundled JKS + `JAVA_TOOL_OPTIONS`.
 - Use `install_certs_jvm_rhel.sh` for RHEL-family `update-ca-trust`.
+- Use `build_jvm_truststore_linux.sh` only for the generic bundled-JKS flow; RHEL uses the PEM directly.
 - Linux JVM scripts are self-contained; there is no shared `_jvm_linux_paths.sh`.
 - Users of the generic flow must open a new login shell (or `source /etc/environment`) for env changes to take effect. `gradle --stop` refreshes the Gradle Daemon.
 
@@ -715,6 +745,19 @@ powershell -ExecutionPolicy Bypass -File validate_certs_jvm_windows.ps1 -Expecte
 
 Exit code 0 if all checks pass, 1 otherwise. Result line is qualified with a count of any non-fatal warnings.
 
+### Building the bundled truststore
+
+`build_jvm_truststore_windows.ps1` creates the `-UseTruststore` input for the Windows JVM installer. It imports Windows `LocalMachine\Root` certificates into a JKS truststore, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_jvm_truststore_windows.ps1 `
+  -UseCert C:\tmp\ZscalerRoot0.pem `
+  -Output C:\tmp\package-route-truststore.jks
+
+powershell -ExecutionPolicy Bypass -File .\install_certs_jvm_windows.ps1 `
+  -UseTruststore C:\tmp\package-route-truststore.jks
+```
+
 ### Caveats
 
 - **New sessions only.** `WM_SETTINGCHANGE` reaches Explorer and a few shells but most JVM-launching processes (Gradle Daemon, IntelliJ, Maven via the wrapper) cache their environment at startup. Open a new PowerShell/cmd or log off/on after install.
@@ -738,7 +781,7 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 
 ### Summary (Windows JVM)
 
-- **No Administrator required.** Single cert source via `-UseCert`.
+- **No Administrator required.** Single truststore source via `-UseTruststore`.
 - Per-user JKS at `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks`.
 - User-scope `JAVA_TOOL_OPTIONS` in `HKCU\Environment`, broadcast via `WM_SETTINGCHANGE`.
 - **Idempotent**, **re-runnable**, **JDK-version-agnostic** across currently-supported JDKs (JKS format is still read by JDK 8–25; a future JDK that drops JKS support would require an installer-side format bump). New JDK installs do not require re-running the script.

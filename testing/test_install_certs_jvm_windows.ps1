@@ -5,9 +5,9 @@
 #   powershell -ExecutionPolicy Bypass -File testing/test_install_certs_jvm_windows.ps1
 #
 # No Administrator required -- User-scope env vars and %LOCALAPPDATA% paths
-# are per-user. The runner builds a bundled truststore fixture from the local
-# JDK cacerts plus a lab CA, then verifies the installer only copies that
-# ready-made JKS into place and configures HKCU\Environment.
+# are per-user. The runner builds a bundled truststore fixture from Windows
+# LocalMachine root certificates plus a lab CA, then verifies the installer only
+# copies that ready-made JKS into place and configures HKCU\Environment.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
@@ -157,21 +157,6 @@ function Get-Keytool {
 }
 $Keytool = Get-Keytool
 
-function Resolve-JdkCacerts {
-    if ($env:JAVA_HOME) {
-        $candidate = Join-Path $env:JAVA_HOME 'lib\security\cacerts'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $candidate
-        }
-    }
-    $keytoolDir = Split-Path -Parent $Keytool
-    $candidate = Join-Path $keytoolDir '..\lib\security\cacerts'
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-        return (Resolve-Path -LiteralPath $candidate).Path
-    }
-    Fail-Test 'cannot locate JDK cacerts for bundled truststore fixture'
-}
-
 function Invoke-Keytool {
     param([string[]]$KeytoolArgs)
     $prevEAP = $ErrorActionPreference
@@ -191,17 +176,19 @@ function Invoke-Keytool {
 
 function Build-BundledTruststore {
     param([string]$CaPath)
-    $srcCacerts = Resolve-JdkCacerts
     Remove-Item -LiteralPath $BundleJks -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath $srcCacerts -Destination $BundleJks -Force
-    Invoke-Keytool -KeytoolArgs @(
-        '-importcert', '-noprompt',
-        '-alias', 'package-route-custom-ca',
-        '-file', $CaPath,
-        '-keystore', $BundleJks,
-        '-storepass', 'changeit'
-    ) | Out-Null
-    Write-Host ("Bundled truststore fixture: {0} (base: {1})" -f $BundleJks, $srcCacerts)
+    $raw = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+        -File '.\build_jvm_truststore_windows.ps1' `
+        -UseCert $CaPath `
+        -Output $BundleJks 2>&1
+    $rc = $LASTEXITCODE
+    if ($rc -ne 0) {
+        Write-Host "--- captured output ---"
+        Write-Host ($raw | Out-String)
+        Write-Host "--- end captured output ---"
+        Fail-Test "build_jvm_truststore_windows.ps1 exited $rc"
+    }
+    Write-Host ("Bundled truststore fixture: {0}" -f $BundleJks)
 }
 
 Build-BundledTruststore -CaPath $labCa
@@ -307,7 +294,7 @@ Write-Host ("  ok ({0} aliases)" -f $aliasCount)
 
 Write-Host ""
 Write-Host "=== 10. JKS contains a well-known public root (DigiCert family) ==="
-$listOut10 = Invoke-Keytool -KeytoolArgs @('-list', '-keystore', $JksPath, '-storepass', 'changeit')
+$listOut10 = Invoke-Keytool -KeytoolArgs @('-list', '-v', '-keystore', $JksPath, '-storepass', 'changeit')
 if (-not ($listOut10 | Select-String -Pattern 'digicert' -SimpleMatch -Quiet)) {
     Fail-Test "JKS missing the DigiCert family of public roots; the bundled truststore fixture is incomplete"
 }

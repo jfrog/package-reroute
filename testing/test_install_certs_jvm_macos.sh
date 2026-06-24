@@ -7,8 +7,8 @@
 #
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
 # fresh-state cases and via `trap EXIT`. The test runner builds a bundled
-# truststore fixture from the local JDK cacerts plus a lab CA, then verifies the
-# installer only copies that ready-made JKS into place and configures launchd.
+# truststore fixture from macOS system certificates plus a lab CA, then verifies
+# the installer only copies that ready-made JKS into place and configures launchd.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
@@ -92,58 +92,13 @@ require_keytool() {
     command -v keytool >/dev/null 2>&1 || fail_msg "keytool not on PATH (validator/test fixture requires a JDK)"
 }
 
-find_jdk_cacerts() {
-    if [[ -n "${JAVA_HOME:-}" && -f "${JAVA_HOME}/lib/security/cacerts" ]]; then
-        echo "${JAVA_HOME}/lib/security/cacerts"
-        return 0
-    fi
-
-    if [[ -x /usr/libexec/java_home ]]; then
-        local java_home_out
-        java_home_out="$(/usr/libexec/java_home 2>/dev/null || true)"
-        if [[ -n "$java_home_out" && -f "${java_home_out}/lib/security/cacerts" ]]; then
-            echo "${java_home_out}/lib/security/cacerts"
-            return 0
-        fi
-    fi
-
-    local keytool_path resolved link
-    keytool_path="$(command -v keytool 2>/dev/null || true)"
-    if [[ -n "$keytool_path" ]]; then
-        resolved="$keytool_path"
-        local depth=0
-        while [[ -L "$resolved" && $depth -lt 16 ]]; do
-            link="$(readlink "$resolved")"
-            if [[ "$link" = /* ]]; then
-                resolved="$link"
-            else
-                resolved="$(dirname "$resolved")/$link"
-            fi
-            depth=$((depth + 1))
-        done
-        local keytool_dir
-        keytool_dir="$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)"
-        if [[ -n "$keytool_dir" && -f "${keytool_dir}/../lib/security/cacerts" ]]; then
-            echo "${keytool_dir}/../lib/security/cacerts"
-            return 0
-        fi
-    fi
-
-    fail_msg "cannot locate JDK cacerts for bundled truststore fixture"
-}
-
 build_bundle_truststore() {
-    local ca_path="$1" src_cacerts
-    src_cacerts="$(find_jdk_cacerts)"
+    local ca_path="$1"
     rm -f "$BUNDLE_JKS"
-    cp "$src_cacerts" "$BUNDLE_JKS"
-    chmod 0644 "$BUNDLE_JKS"
-    keytool -importcert -noprompt \
-        -alias package-route-custom-ca \
-        -file "$ca_path" \
-        -keystore "$BUNDLE_JKS" \
-        -storepass changeit >/dev/null
-    echo "Bundled truststore fixture: $BUNDLE_JKS (base: $src_cacerts)"
+    OPENSSL="$OPENSSL" ./build_jvm_truststore_macos.sh \
+        --use-cert "$ca_path" \
+        --output "$BUNDLE_JKS" >/dev/null
+    echo "Bundled truststore fixture: $BUNDLE_JKS"
 }
 
 # Generate the lab CA used by all positive cases.
@@ -230,7 +185,7 @@ corp_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
     | grep -cE "^package-route-custom-ca[,[:space:]]" || true)
 corp_count=${corp_count:-0}
 [[ "$corp_count" -eq 1 ]] || fail_msg "expected exactly 1 corporate-CA alias after 2 installs, got $corp_count"
-[[ "$alias_count" -ge 100 ]] || fail_msg "expected JKS to extend default cacerts (>=100 aliases), got $alias_count"
+[[ "$alias_count" -ge 100 ]] || fail_msg "expected JKS to include macOS system roots (>=100 aliases), got $alias_count"
 [[ -f "$PLIST" ]] || fail_msg "plist missing after 2nd install"
 echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
@@ -342,17 +297,17 @@ echo "=== 10. JKS extends bundled public roots ==="
 alias_count="$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
 alias_count="${alias_count:-0}"
 [[ "$alias_count" -ge 100 ]] \
-    || fail_msg "JKS has $alias_count aliases; expected >= 100 (JDK cacerts ~150 public roots + corporate CA)"
+    || fail_msg "JKS has $alias_count aliases; expected >= 100 (macOS system roots + corporate CA)"
 echo "  ok ($alias_count aliases)"
 
 echo
 echo "=== 11. JKS contains a well-known public root (DigiCert family) ==="
 # Spot-check the merge actually happened. DigiCert root certs ship in every
-# JDK's cacerts under several aliases (digicertglobalrootca, digicertglobalrootg2,
-# digicerttrustedrootg4, etc.) — case-insensitive substring match catches them all.
-keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
+# macOS system trust bundle under several names; case-insensitive substring
+# match catches the family.
+keytool -list -v -keystore "$JKS" -storepass changeit 2>/dev/null \
     | grep -qi 'digicert' \
-    || fail_msg "JKS missing the DigiCert family of public roots; the copy-from-JDK step did not run"
+    || fail_msg "JKS missing the DigiCert family of public roots; the system-root bundle is incomplete"
 echo "  ok"
 
 echo
