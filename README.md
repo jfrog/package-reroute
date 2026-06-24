@@ -25,9 +25,10 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (JKS subject + plist + `launchctl getenv`) |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
-| **install_certs_jvm_linux.sh** | Linux (JVM) | Install CA for Maven/Gradle/sbt/Ivy: RHEL family → `update-ca-trust extract` into system anchors; others → per-host JKS + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
-| **validate_certs_jvm_linux.sh** | Linux (JVM) | Validate JVM truststore install (auto-detects Path A vs B; checks anchor file or JKS subject + `/etc/environment` + shell-rc) |
-| **_jvm_linux_paths.sh** | Linux (JVM) | Shared constants dot-sourced by installer + validator. Not directly executable. |
+| **install_certs_jvm_linux.sh** | Linux (JVM) | Install bundled JVM truststore: JKS at `/etc/ssl/package-route-jvm/truststore.jks` + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
+| **validate_certs_jvm_linux.sh** | Linux (JVM) | Validate bundled JVM truststore install (JKS subject + `/etc/environment` + shell-rc) |
+| **install_certs_jvm_rhel.sh** | RHEL (JVM) | Install PEM into RHEL-family system trust via `update-ca-trust extract` |
+| **validate_certs_jvm_rhel.sh** | RHEL (JVM) | Validate RHEL JVM system-trust install (anchor PEM + extracted Java cacerts) |
 | **install_certs_windows.ps1** | Windows | Install cert, set env vars (Node/Python/Ruby), and clear Docker Hub credentials |
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 | **install_certs_jvm_windows.ps1** | Windows (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS at `%LOCALAPPDATA%` + User-scope `JAVA_TOOL_OPTIONS` |
@@ -461,83 +462,100 @@ sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example
 
 ### Overview
 
-`install_certs_jvm_linux.sh` wires a custom CA certificate into the JVM trust path so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_debian_ubuntu.sh` if you need the Node/Python flows or Docker Hub credential cleanup.
+`install_certs_jvm_linux.sh` wires a bundled JVM truststore into the JVM trust path so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_debian_ubuntu.sh` if you need the Node/Python flows or Docker Hub credential cleanup.
 
-The script auto-detects between two lab-verified paths:
+This generic Linux script always uses the JKS + `JAVA_TOOL_OPTIONS` recipe:
 
-- **Path A — `update-ca-trust`** for RHEL/Fedora/CentOS/Amazon-Linux when a JDK whose `lib/security/cacerts` is symlinked to `/etc/pki/ca-trust/extracted/java/cacerts` is on `PATH` (Red Hat OpenJDK, and on some images Corretto). Drops the CA into `/etc/pki/ca-trust/source/anchors/` and runs `update-ca-trust extract`. **No env var is set.**
-- **Path B — JKS + `JAVA_TOOL_OPTIONS`** for everything else (Debian/Ubuntu, manual JDK installs that don't symlink to the system store, SDKMAN, snap-confined JDKs). Builds a JKS truststore at `/etc/ssl/package-route-jvm/truststore.jks` containing only the customer CA, then sets `JAVA_TOOL_OPTIONS` in `/etc/environment`. JDK-version-agnostic by construction — one env var serves all current and future JDKs.
+1. Copies the supplied truststore to `/etc/ssl/package-route-jvm/truststore.jks`.
+2. Writes `JAVA_TOOL_OPTIONS` to `/etc/environment`.
+3. Updates the invoking developer user's `.bashrc` or `.zshrc` when a non-root user can be determined.
 
-Auto-detection logic (`detect_mode` in the script):
-
-1. If `update-ca-trust` is not on `PATH` → **Path B**.
-2. If `/etc/pki/ca-trust/extracted/java/cacerts` does not exist → **Path B**.
-3. If no `java` is on `PATH` → **Path A** (assumes Red Hat OpenJDK will be installed via `dnf`; the installer prints a loud end-of-run warning instructing the user to re-run with `--mode java-tool-options` if they install Corretto/Temurin/SDKMAN instead).
-4. If the resolved `java`'s `lib/security/cacerts` symlinks to the RHEL system store → **Path A**; otherwise **Path B**.
-
-`--mode java-tool-options` or `--mode update-ca-trust` overrides the detection.
-
-Both scripts source a small shared file `_jvm_linux_paths.sh` for the constants block (CA basename default, anchor dir, JKS path, password, env file) so the installer and validator cannot drift.
+RHEL-family hosts that intentionally use Red Hat OpenJDK system trust should use `install_certs_jvm_rhel.sh` instead.
 
 ### Requirements
 
-- **Linux** (Debian/Ubuntu family OR RHEL/Fedora/CentOS/Amazon-Linux family).
+- **Linux**.
 - **Root** (`sudo`).
-- **`openssl`** on `PATH`.
-- **`keytool`** on `PATH` (provided by any JDK) **for Path B**. On Path A the verification step uses `keytool` opportunistically but the install itself does not need it; the installer emits a warning if `keytool` is missing on Path A.
+- A prebuilt JVM truststore readable with password `changeit`.
 
 ### Options
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validated: must be a parseable X.509, not expired, with `CA:TRUE` in basicConstraints. Bundles emit a warning (only the first cert imports). |
-| `--mode auto\|java-tool-options\|update-ca-trust` | No (default: **auto**) | Override path detection. |
-| `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name applied to the Path A anchor file (`/etc/pki/ca-trust/source/anchors/<name>.crt`) AND the Path B JKS alias. Must match `[A-Za-z0-9._-]+`. Pass the same value to the validator. |
+| `--use-truststore <path>` | **Yes** | Path to an existing JVM truststore (JKS/PKCS12-compatible). The truststore is copied as-is and must be readable by JVMs with password `changeit`. |
 | `-h`, `--help` | — | Usage. |
 
 ### Examples
 
 ```bash
-# Auto-detect; works on both RHEL family and Debian/Ubuntu
-sudo ./install_certs_jvm_linux.sh --use-cert /tmp/ZscalerRoot0.pem
-
-# Force JAVA_TOOL_OPTIONS path even on a RHEL host
-sudo ./install_certs_jvm_linux.sh --use-cert /tmp/ZscalerRoot0.pem --mode java-tool-options
-
-# Custom basename for the anchor file / JKS alias
-sudo ./install_certs_jvm_linux.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+sudo ./install_certs_jvm_linux.sh --use-truststore /tmp/package-route-truststore.jks
 ```
 
 ### Validation: validate_certs_jvm_linux.sh
 
-**`--expected-subject` is required.** The validator auto-detects which path was used (by checking for the JKS file or the anchor file), then asserts the customer CA is present by case-insensitive subject substring match. `--all-users` iterates `/home/*` and is Path B-specific (requires root; checked at `parse_args` time, fails fast). Pass `--cert-name <name>` if the installer was invoked with a non-default value.
+**`--expected-subject` is required.** The validator asserts the copied JKS contains a cert with the expected subject, `/etc/environment` points at the JKS, and the relevant shell rc files are wired. `--all-users` iterates `/home/*` and requires root.
 
 ```bash
 ./validate_certs_jvm_linux.sh --expected-subject "O=Zscaler"
 sudo ./validate_certs_jvm_linux.sh --expected-subject "O=Zscaler" --all-users
-./validate_certs_jvm_linux.sh --expected-subject "O=Zscaler" --cert-name zscaler-root
 ```
 
-Exit code 0 if all checks pass, 1 otherwise. Missing `JAVA_TOOL_OPTIONS` in a user rc file is a **warning** (not a failure) — `/etc/environment` is the authoritative source for system-wide config. Missing `keytool` while a keystore exists is a **failure** (cannot verify the core invariant).
+Exit code 0 if all checks pass, 1 otherwise. Missing `JAVA_TOOL_OPTIONS` in a user rc file is a **warning** (not a failure) — `/etc/environment` is the authoritative source for system-wide config. Missing `keytool` while a keystore exists is a **failure** because the validator cannot verify the core invariant.
 
 ### Caveats
 
-- **`/etc/environment` activation** (Path B). GUI-launched apps (IntelliJ from the GNOME/KDE launcher) inherit `/etc/environment` via the session manager at login. Existing sessions need a logoff/login to pick up the new env var. The script updates the SUDO_USER's `.bashrc`/`.zshrc` so the *current* shell session has it without re-login.
-- **Gradle Daemon caching** (Path B). A Gradle Daemon started before the env var was set still uses its captured environment. Run `gradle --stop` after onboarding.
-- **`Picked up JAVA_TOOL_OPTIONS:` banner** (Path B). Every JVM prints this to stderr at startup. CI log parsers that strict-match empty-stderr need to tolerate it.
-- **`changeit` truststore password.** The JKS at `/etc/ssl/package-route-jvm/truststore.jks` uses the OpenJDK convention password `changeit`. This is **not** a secret — JKS truststores protect file integrity, not contents, and the trust anchor inside is a public CA certificate. The password is persisted in `/etc/environment` via the `-Djavax.net.ssl.trustStorePassword` flag so unattended JVMs can open the store.
-- **Path B truststore extends the JDK's bundled cacerts.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The installer therefore copies `$JAVA_HOME/lib/security/cacerts` to `/etc/ssl/package-route-jvm/truststore.jks` first, then `keytool -importcert` appends the corporate CA. The resulting store has ~150 public roots **plus** the corporate one. Path A is unaffected — `update-ca-trust extract` already builds the system-wide Java cacerts by merging system anchors with the JDK's defaults.
-- **Mixed-distro auto-detection.** On RHEL family with a non-Red-Hat JDK on PATH (Corretto, Temurin, SDKMAN), auto-detection lands on Path B because the JDK's `lib/security/cacerts` is not symlinked to the RHEL system store. On RHEL family with **no** JDK on PATH yet, auto-detection picks Path A on the assumption that Red Hat OpenJDK will follow via `dnf` — the installer emits a loud end-of-run warning naming this assumption.
-- **Snap-confined JDKs** are not configured by Path A (read-only squashfs). Auto-detection lands on Path B because the snap cacerts is not symlinked to the system one. Path B works because `JAVA_TOOL_OPTIONS` is read by the JVM at startup regardless of how the JDK was installed.
-- **Container-internal JDKs.** Maven/Gradle running inside Docker on a developer machine need the CA wired into the *container* image — host-side install does not propagate. Use a `RUN` step in the Dockerfile or pass `JAVA_TOOL_OPTIONS` via `docker run -e`.
-- **`MAVEN_OPTS` clobbering.** If your shell or `~/.mavenrc` sets `MAVEN_OPTS`, those args land AFTER `JAVA_TOOL_OPTIONS` and can override the trust store flags. If `mvn` fails TLS after install, check `env | grep -E '^(JAVA_TOOL_OPTIONS|MAVEN_OPTS)='` — if both are set, ensure `MAVEN_OPTS` does NOT also include `-Djavax.net.ssl.trustStore`.
-- **IntelliJ per-IDE SSL store.** `~/.config/JetBrains/<IDE>/ssl/cacerts` is a separate trust store used by the IDE for the plugin marketplace and VCS integration — NOT by Maven/Gradle runs spawned from IntelliJ (those use the JBR's truststore which the env var path covers). If `mvn` works in Terminal but IntelliJ Maven sync fails, add the CA via Settings → Tools → Server Certificates.
-- **Idempotent re-runs.** Path B re-creates the JKS each run (single alias guaranteed) and replaces (not appends) the env var line in `/etc/environment`. Path A re-copies the anchor and re-runs `update-ca-trust extract` (with fingerprint-compare to surface a deliberate replacement vs. an idempotent re-run). Running the script twice produces the same final state.
-- **Existing anchor file replacement (Path A).** A file at `/etc/pki/ca-trust/source/anchors/<cert-name>.crt` placed by other tooling is replaced if its SHA-256 fingerprint differs from `--use-cert`. The installer prints a `[warn] Replacing existing anchor` line with both fingerprints so the swap is auditable.
+- **`/etc/environment` activation.** GUI-launched apps (IntelliJ from the GNOME/KDE launcher) inherit `/etc/environment` via the session manager at login. Existing sessions need a logoff/login to pick up the new env var. The script updates the SUDO_USER's `.bashrc`/`.zshrc` so the current shell session has it without re-login.
+- **Gradle Daemon caching.** A Gradle Daemon started before the env var was set still uses its captured environment. Run `gradle --stop` after onboarding.
+- **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM prints this to stderr at startup. CI log parsers that strict-match empty-stderr need to tolerate it.
+- **The supplied JKS must include public roots.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The release process that creates the bundled truststore owns including public roots plus the corporate CA before install.
+- **Container-internal JDKs.** Maven/Gradle running inside Docker on a developer machine need the CA wired into the container image — host-side install does not propagate. Use a `RUN` step in the Dockerfile or pass `JAVA_TOOL_OPTIONS` via `docker run -e`.
+- **`MAVEN_OPTS` clobbering.** If your shell or `~/.mavenrc` sets `MAVEN_OPTS`, those args land AFTER `JAVA_TOOL_OPTIONS` and can override the trust store flags. If `mvn` fails TLS after install, check `env | grep -E '^(JAVA_TOOL_OPTIONS|MAVEN_OPTS)='`.
+- **IntelliJ per-IDE SSL store.** `~/.config/JetBrains/<IDE>/ssl/cacerts` is a separate trust store used by the IDE for the plugin marketplace and VCS integration — NOT by Maven/Gradle runs spawned from IntelliJ.
+
+---
+
+## RHEL (JVM): install_certs_jvm_rhel.sh
+
+### Overview
+
+`install_certs_jvm_rhel.sh` is for RHEL/Fedora/CentOS/Rocky/Alma/Amazon-Linux hosts where Java trust follows the system trust generated by `update-ca-trust`.
+
+It installs a PEM anchor into `/etc/pki/ca-trust/source/anchors/<cert-name>.crt` and runs `update-ca-trust extract`. It does **not** write `JAVA_TOOL_OPTIONS`.
+
+### Requirements
+
+- **RHEL-family Linux**.
+- **Root** (`sudo`).
+- **`openssl`** and **`update-ca-trust`** on `PATH`.
+- **`keytool`** is optional for install-time verification; the validator requires it to inspect Java cacerts.
+
+### Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validated: parseable X.509, not expired, and `CA:TRUE` in basicConstraints. |
+| `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for `/etc/pki/ca-trust/source/anchors/<name>.crt`. Must match `[A-Za-z0-9._-]+`. |
+| `-h`, `--help` | — | Usage. |
+
+### Examples
+
+```bash
+sudo ./install_certs_jvm_rhel.sh --use-cert /tmp/ZscalerRoot0.pem
+sudo ./install_certs_jvm_rhel.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+```
+
+### Validation: validate_certs_jvm_rhel.sh
+
+```bash
+./validate_certs_jvm_rhel.sh --expected-subject "O=Zscaler"
+./validate_certs_jvm_rhel.sh --expected-subject "O=Zscaler" --cert-name zscaler-root
+```
+
+The validator checks the installed anchor PEM and `/etc/pki/ca-trust/extracted/java/cacerts`.
 
 ### Testing
 
-`./testing/test_install_certs_jvm_linux.sh` runs the Docker smoke matrix across four distro × JDK combinations in parallel from any host with Docker. Each container builds a self-signed lab CA, runs the installer, runs the validator, then exercises negative subject, idempotency, custom `--cert-name`, path-traversal rejection, malformed-PEM rejection, expired-CA rejection, and leaf-cert rejection.
+`./testing/test_install_certs_jvm_linux.sh` runs the Docker smoke matrix across generic Linux and RHEL flows. Each container builds a lab CA; generic Linux tests build a bundled truststore fixture, while the RHEL test exercises the PEM/update-ca-trust path.
 
 ```bash
 # From repo root (any host with Docker)
@@ -550,11 +568,10 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 
 ### Summary (Linux JVM)
 
-- **One run as root**, single cert source via `--use-cert`.
-- **Path A**: anchor in `/etc/pki/ca-trust/source/anchors/<cert-name>.crt`; `update-ca-trust extract` updates the system Java trust store. No env var.
-- **Path B**: JKS at `/etc/ssl/package-route-jvm/truststore.jks` with alias `<cert-name>`; `JAVA_TOOL_OPTIONS` in `/etc/environment` and in the developer user's `.bashrc`/`.zshrc`.
-- **Idempotent** (both paths), **re-runnable**, **JDK-version-agnostic** across currently-supported JDKs — JKS format is still read by JDK 8–25 (Path B); Path A piggy-backs on the OS trust store that Red Hat OpenJDK already symlinks. A future JDK that drops JKS support would require a Path B format bump.
-- Users must open a new login shell (or `source /etc/environment`) for env changes to take effect. `gradle --stop` to refresh the Gradle Daemon.
+- Use `install_certs_jvm_linux.sh` for bundled JKS + `JAVA_TOOL_OPTIONS`.
+- Use `install_certs_jvm_rhel.sh` for RHEL-family `update-ca-trust`.
+- Linux JVM scripts are self-contained; there is no shared `_jvm_linux_paths.sh`.
+- Users of the generic flow must open a new login shell (or `source /etc/environment`) for env changes to take effect. `gradle --stop` refreshes the Gradle Daemon.
 
 ---
 

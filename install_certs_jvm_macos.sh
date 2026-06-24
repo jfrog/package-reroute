@@ -33,7 +33,8 @@
 #     /Library/LaunchDaemons running as root) before any user logs in.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   install_certs_jvm_linux.sh       — update-ca-trust OR JKS+JAVA_TOOL_OPTIONS
+#   install_certs_jvm_linux.sh       — bundled JKS + JAVA_TOOL_OPTIONS
+#   install_certs_jvm_rhel.sh        — RHEL update-ca-trust
 #   install_certs_jvm_windows.ps1    — HKCU\Environment + per-user JKS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
