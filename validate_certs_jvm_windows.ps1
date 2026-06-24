@@ -36,8 +36,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$ScriptDir = Split-Path -Parent $PSCommandPath
-. (Join-Path $ScriptDir '_jvm_windows_paths.ps1')
+# Keep this validator self-contained: it is often copied/run as a standalone
+# script during onboarding, so avoid requiring sibling files for constants.
+$JvmWindowsJksRelativeDir = 'JFrog\package-route-jvm'
+$JvmWindowsJksBasename = 'truststore.jks'
+$JvmWindowsJksPassword = 'changeit'
+$JvmWindowsEnvVarName = 'JAVA_TOOL_OPTIONS'
+
+function Get-JvmWindowsJksPath {
+    Join-Path $env:LOCALAPPDATA (Join-Path $JvmWindowsJksRelativeDir $JvmWindowsJksBasename)
+}
 
 $script:FailCount = 0
 $script:WarnCount = 0

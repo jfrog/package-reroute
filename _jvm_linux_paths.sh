@@ -9,8 +9,8 @@
 # Keep installer and validator in lockstep by changing only this file.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   _jvm_macos_paths.sh     — per-user JKS under ~/Library
-#   _jvm_windows_paths.ps1  — per-user JKS under %LOCALAPPDATA%
+#   install_certs_jvm_macos.sh      — per-user JKS under ~/Library
+#   install_certs_jvm_windows.ps1   — per-user JKS under %LOCALAPPDATA%
 
 # Default base name for the installed CA file (Path A) and the JKS alias (Path B).
 # Overridable via --cert-name on the installer; the validator must be invoked with

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Install a custom CA certificate on macOS for JVM clients (Maven, Gradle, sbt,
-# Apache Ivy).
+# Install a bundled JVM truststore on macOS for JVM clients (Maven, Gradle,
+# sbt, Apache Ivy).
 #
-# Single path: build a per-user JKS truststore at
+# Single path: copy a supplied JKS truststore to
 #   ~/Library/Application Support/JFrog/package-route-jvm/truststore.jks
-# containing only the customer CA, then install a per-user LaunchAgent at
+# then install a per-user LaunchAgent at
 #   ~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist
 # that runs `launchctl setenv JAVA_TOOL_OPTIONS=…` at RunAtLoad. This is the
 # ONLY recipe that reaches Dock-launched IDE builds — the ~/.zshrc shortcut
@@ -13,8 +13,8 @@
 # KeychainStore is broken per JDK-8321045.
 #
 # Run:
-#   sudo bash install_certs_jvm_macos.sh --use-cert /path/to/cert.pem
-#       [--cert-name <name>] [--all-users]
+#   sudo bash install_certs_jvm_macos.sh --use-truststore /path/to/truststore.jks
+#       [--all-users]
 #
 # Notes:
 #   - macOS only.
@@ -41,25 +41,29 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck disable=SC1091
-. "${SCRIPT_DIR}/_jvm_macos_paths.sh"
+# Keep this installer self-contained: it is often copied/run as a standalone
+# script during onboarding, so avoid requiring sibling files for constants.
+JKS_RELATIVE_DIR="Library/Application Support/JFrog/package-route-jvm"
+JKS_BASENAME="truststore.jks"
+LAUNCH_AGENT_RELATIVE_DIR="Library/LaunchAgents"
+LAUNCH_AGENT_LABEL="com.jfrog.package-reroute.jto-env"
+LAUNCH_AGENT_BASENAME="${LAUNCH_AGENT_LABEL}.plist"
+JKS_PASSWORD="changeit"
 
-USE_CERT=""
+USE_TRUSTSTORE=""
 ALL_USERS=0
-CERT_BASENAME="${JVM_MACOS_DEFAULT_CERT_BASENAME}"
 
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-cert <path> [--cert-name <name>] [--all-users]
+  sudo $0 --use-truststore <path> [--all-users]
 
 Options:
-  --use-cert <path>      Path to an existing PEM/CRT certificate file (required).
-  --cert-name <name>     Alias under which the CA is stored inside the JKS
-                         truststore (default: ${CERT_BASENAME}). Cosmetic — affects
-                         only \`keytool -list\` output. JKS path, plist path, and
-                         LaunchAgent label are fixed per-user.
+  --use-truststore <path>
+                         Path to an existing JVM truststore (JKS/PKCS12-compatible)
+                         to copy into each target user's fixed JKS location.
+                         The truststore must be readable by JVMs with password
+                         '${JKS_PASSWORD}'.
   --all-users            Iterate /Users/* (UID >= 501, skip Shared) and install
                          a LaunchAgent + JKS for every account. Default = only
                          SUDO_USER (or the console-user under JAMF).
@@ -71,16 +75,15 @@ because the KeychainStore truststoreType is broken (JDK-8321045) and no
 OS-trust fallback exists.
 
 Examples:
-  sudo $0 --use-cert /tmp/ZscalerRoot0.pem
-  sudo $0 --use-cert /tmp/ca.pem --all-users
-  sudo $0 --use-cert /tmp/ca.pem --cert-name zscaler-root
+  sudo $0 --use-truststore /tmp/package-route-truststore.jks
+  sudo $0 --use-truststore /tmp/package-route-truststore.jks --all-users
 EOF
 }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-cert <path> [--cert-name <name>] [--all-users]" >&2
+        echo "Use: sudo $0 --use-truststore <path> [--all-users]" >&2
         exit 1
     fi
 }
@@ -88,12 +91,8 @@ require_root() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --use-cert)
-                USE_CERT="${2:?Error: --use-cert requires a value}"
-                shift 2
-                ;;
-            --cert-name)
-                CERT_BASENAME="${2:?Error: --cert-name requires a value}"
+            --use-truststore)
+                USE_TRUSTSTORE="${2:?Error: --use-truststore requires a value}"
                 shift 2
                 ;;
             --all-users)
@@ -112,26 +111,24 @@ parse_args() {
         esac
     done
 
-    if [[ -z "$USE_CERT" ]]; then
-        echo "Error: --use-cert is required." >&2
+    if [[ -z "$USE_TRUSTSTORE" ]]; then
+        echo "Error: --use-truststore is required." >&2
         usage >&2
         exit 1
     fi
 
-    if [[ ! -f "$USE_CERT" ]]; then
-        echo "Error: certificate file not found: $USE_CERT" >&2
+    if [[ ! -f "$USE_TRUSTSTORE" ]]; then
+        echo "Error: truststore file not found: $USE_TRUSTSTORE" >&2
         exit 1
     fi
 
-    if [[ -z "$CERT_BASENAME" ]]; then
-        echo "Error: --cert-name cannot be empty." >&2
+    if [[ ! -r "$USE_TRUSTSTORE" ]]; then
+        echo "Error: truststore file is not readable: $USE_TRUSTSTORE" >&2
         exit 1
     fi
 
-    # Reject path-traversal characters so $CERT_BASENAME stays a single segment
-    # safe to substitute into the JKS alias and the LaunchAgent label suffix.
-    if [[ ! "$CERT_BASENAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        echo "Error: --cert-name must match [A-Za-z0-9._-]+ (got: $CERT_BASENAME)." >&2
+    if [[ ! -s "$USE_TRUSTSTORE" ]]; then
+        echo "Error: truststore file is empty: $USE_TRUSTSTORE" >&2
         exit 1
     fi
 }
@@ -145,202 +142,26 @@ check_os() {
     fi
 }
 
-check_dependencies() {
-    if ! command -v openssl >/dev/null 2>&1; then
-        echo "Error: openssl is required but not found on PATH." >&2
-        exit 1
-    fi
-    # keytool is needed for the JKS step; checked at build_jks entry to keep
-    # validate_pem reachable even when no JDK is installed yet.
-}
-
-# Locate the JDK's default cacerts file. Mirrors the Linux sibling: see the
-# header comment on install_certs_jvm_linux.sh:find_jdk_cacerts for the
-# rationale (OpenJDK's -Djavax.net.ssl.trustStore replaces rather than
-# extends; we must copy the bundled cacerts as the base of our merged store).
-#
-# Resolution: $JAVA_HOME first, then dir-of-resolved-keytool. macOS-specific
-# wrinkle: BSD readlink doesn't support -f, so we walk symlinks manually
-# (Apple's /usr/bin/keytool is a stub that resolves through several layers).
-find_jdk_cacerts() {
-    local candidate=""
-
-    # 1. Explicit JAVA_HOME. Under `sudo` macOS strips this via env_reset, so
-    # operators who rely on jenv / asdf / SDKMAN must `sudo -E` or `sudo env
-    # JAVA_HOME=…` — the test runner does this; print a hint if we fall through.
-    if [[ -n "${JAVA_HOME:-}" && -f "${JAVA_HOME}/lib/security/cacerts" ]]; then
-        candidate="${JAVA_HOME}/lib/security/cacerts"
-    fi
-
-    # 2. /usr/libexec/java_home — Apple's canonical resolver, scans
-    # /Library/Java/JavaVirtualMachines + ~/Library/Java/JavaVirtualMachines
-    # and prints the highest-version JDK home. Works under sudo with a stripped
-    # env (no JAVA_HOME) as long as a system-visible JDK is installed.
-    if [[ -z "$candidate" && -x /usr/libexec/java_home ]]; then
-        local java_home_out
-        java_home_out="$(/usr/libexec/java_home 2>/dev/null || true)"
-        if [[ -n "$java_home_out" && -f "${java_home_out}/lib/security/cacerts" ]]; then
-            candidate="${java_home_out}/lib/security/cacerts"
-        fi
-    fi
-
-    # 3. Sibling of resolved keytool. Defensive last resort — typical macOS
-    # PATH-keytool is the Apple stub at /usr/bin/keytool (which delegates via
-    # java_home internally and has no sibling cacerts), but a real JDK on PATH
-    # (Homebrew openjdk, manually-installed Adoptium) does sit next to a
-    # cacerts file. BSD readlink lacks -f, so we walk symlinks manually.
-    if [[ -z "$candidate" ]]; then
-        local keytool_path resolved link
-        keytool_path="$(command -v keytool 2>/dev/null || true)"
-        if [[ -n "$keytool_path" ]]; then
-            resolved="$keytool_path"
-            local depth=0
-            while [[ -L "$resolved" && $depth -lt 16 ]]; do
-                link="$(readlink "$resolved")"
-                if [[ "$link" = /* ]]; then
-                    resolved="$link"
-                else
-                    resolved="$(dirname "$resolved")/$link"
-                fi
-                depth=$((depth + 1))
-            done
-            local keytool_dir
-            keytool_dir="$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)"
-            if [[ -n "$keytool_dir" && -f "${keytool_dir}/../lib/security/cacerts" ]]; then
-                candidate="${keytool_dir}/../lib/security/cacerts"
-            fi
-        fi
-    fi
-
-    if [[ -z "$candidate" ]]; then
-        echo "Error: cannot locate the JDK's default cacerts file." >&2
-        echo "       Tried (in order): \$JAVA_HOME/lib/security/cacerts," >&2
-        echo "                         /usr/libexec/java_home → */lib/security/cacerts," >&2
-        echo "                         \$(dirname keytool)/../lib/security/cacerts." >&2
-        echo "       Install a JDK (Homebrew, Adoptium, etc.), or invoke as 'sudo -E ./install_…'" >&2
-        echo "       to preserve your shell's JAVA_HOME under sudo." >&2
-        exit 1
-    fi
-    echo "$candidate"
-}
-
-validate_pem() {
-    local path="$1"
-
-    # C1 cross-platform parity: require PEM text input. DER would parse via
-    # openssl + import via keytool here (-inform der would be implied) and
-    # silently succeed — but the Linux + Windows siblings reject DER, so we
-    # also reject it for predictable cross-platform behaviour.
-    if ! grep -q -- '-----BEGIN CERTIFICATE-----' "$path" 2>/dev/null; then
-        echo "Error: certificate is not PEM-encoded: $path" >&2
-        echo "       If it's DER, convert first:" >&2
-        echo "         openssl x509 -inform der -in $path -out $path.pem" >&2
-        exit 1
-    fi
-
-    if ! openssl x509 -in "$path" -noout >/dev/null 2>&1; then
-        echo "Error: invalid PEM/CRT certificate file: $path" >&2
-        exit 1
-    fi
-
-    # Reject expired anchors: keytool -importcert -noprompt accepts them silently
-    # and the user gets cryptic CertificateExpiredException at TLS handshake time.
-    if ! openssl x509 -in "$path" -checkend 0 -noout >/dev/null 2>&1; then
-        echo "Error: certificate has already expired: $path" >&2
-        exit 1
-    fi
-
-    # Warn (don't fail) on a cert expiring within 30 days — likely operator error.
-    # I23 parity: the 30-day window matches the Linux JVM_LINUX_EXPIRY_WARN_SECONDS
-    # constant (_jvm_linux_paths.sh) and the Windows AddDays(30) sibling. Change
-    # all three together — there is no single source of truth across the three.
-    if ! openssl x509 -in "$path" -checkend 2592000 -noout >/dev/null 2>&1; then
-        echo "[warn] certificate expires within 30 days: $path" >&2
-    fi
-
-    # Reject leaf certs: a cert without CA:TRUE in basicConstraints will import
-    # into a JKS truststore but PKIX path-building won't use it as a trust anchor.
-    #
-    # Stock macOS ships LibreSSL at /usr/bin/openssl, which does NOT support
-    # `openssl x509 -ext` (that flag is OpenSSL 3.x+). Parse the long-form
-    # `-text` output instead — works on both LibreSSL and OpenSSL.
-    local text bc_line ca_value
-    text="$(openssl x509 -in "$path" -noout -text 2>/dev/null || true)"
-    bc_line="$(awk '
-        /X509v3 Basic Constraints/ { getline; print; exit }
-    ' <<<"$text")"
-    if [[ -n "$bc_line" ]]; then
-        ca_value="$(grep -oE 'CA:(TRUE|FALSE)' <<<"$bc_line" | head -n1 | cut -d: -f2)"
-        if [[ "$ca_value" == "FALSE" ]]; then
-            echo "Error: certificate is not a CA (basicConstraints CA:FALSE): $path" >&2
-            echo "       JKS imports succeed but PKIX rejects non-CA trust anchors." >&2
-            exit 1
-        fi
-    fi
-
-    # Warn on bundles: keytool -importcert -noprompt reads only the first cert,
-    # silently dropping intermediates. Users should split bundles or supply only the root.
-    local count
-    count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$path" 2>/dev/null || echo 0)"
-    if [[ "$count" -gt 1 ]]; then
-        echo "[warn] PEM file contains $count certificates; only the first will be imported as the JVM trust anchor." >&2
-        echo "       Supply only the root CA (or split the bundle) if intermediates are needed." >&2
-    fi
-}
-
-require_keytool() {
-    if ! command -v keytool >/dev/null 2>&1; then
-        echo "Error: keytool is required (provided by any JDK)." >&2
-        echo "  Homebrew:   brew install openjdk@21" >&2
-        echo "  Adoptium:   https://adoptium.net/temurin/releases/" >&2
-        echo "  Manual JDK: add \$JAVA_HOME/bin to PATH (or symlink keytool into /usr/local/bin)." >&2
-        exit 1
-    fi
-}
-
 jks_path_for_user() {
     local user_home="$1"
     echo "${user_home}/${JKS_RELATIVE_DIR}/${JKS_BASENAME}"
 }
 
-build_jks_for_user() {
+install_truststore_for_user() {
     local target_user="$1" user_home="$2"
     local jks_dir="${user_home}/${JKS_RELATIVE_DIR}"
     local jks_path="${jks_dir}/${JKS_BASENAME}"
 
-    local src_cacerts
-    src_cacerts="$(find_jdk_cacerts)"
-    echo "  [JKS] Building truststore at $jks_path (extending $src_cacerts)"
+    echo "  [JKS] Installing truststore at $jks_path"
 
     # macOS mkdir -p will create the intermediate "Application Support" /
     # "JFrog" / "package-route-jvm" tree if missing. Quote the path because
     # "Application Support" contains a space.
     mkdir -p "$jks_dir"
 
-    # Copy the JDK's bundled cacerts (~150 public root CAs) as the base so the
-    # merged store keeps trusting Maven Central, Let's Encrypt, etc. Without
-    # this, -Djavax.net.ssl.trustStore at JTO-resolve time would REPLACE the
-    # JVM's trust source — a JKS containing only the corporate CA would break
-    # every public-CA TLS handshake. Idempotent: cp -f overwrites any prior
-    # JKS, so subsequent installs start from the canonical JDK cacerts again.
-    cp "$src_cacerts" "$jks_path"
-
-    # Capture keytool's combined output so a real failure (wrong format,
-    # unreadable cert, keytool-from-broken-JDK, etc.) doesn't leave the user
-    # with `set -e` aborting at an unhelpful line. The success-case output
-    # ("Certificate was added to keystore") is informational only. No
-    # -storetype flag: modern JDKs default cacerts to PKCS12 and keytool
-    # autodetects the format from the existing file.
-    local keytool_out
-    if ! keytool_out="$(keytool -importcert -noprompt \
-            -alias "$CERT_BASENAME" \
-            -file "$USE_CERT" \
-            -keystore "$jks_path" \
-            -storepass "$JKS_PASSWORD" 2>&1)"; then
-        echo "Error: keytool -importcert failed for $jks_path. Output:" >&2
-        printf '%s\n' "$keytool_out" | sed 's/^/  /' >&2
-        exit 1
-    fi
+    # The installer deliberately treats the supplied truststore as final. The
+    # release process that builds it owns root selection and CA contents.
+    cp "$USE_TRUSTSTORE" "$jks_path"
 
     chmod 0755 "$jks_dir"
     chmod 0644 "$jks_path"
@@ -356,7 +177,7 @@ build_jks_for_user() {
         exit 1
     fi
 
-    echo "  [JKS] OK: alias=$CERT_BASENAME"
+    echo "  [JKS] OK"
 }
 
 # Determine the single non-root target user when --all-users is NOT set.
@@ -571,7 +392,7 @@ install_for_user() {
     local target_user="$1" user_home="$2"
 
     echo "=== User: $target_user (home: $user_home) ==="
-    build_jks_for_user      "$target_user" "$user_home"
+    install_truststore_for_user "$target_user" "$user_home"
     write_launch_agent_plist "$target_user" "$user_home"
     bootstrap_launch_agent  "$target_user" "$user_home"
 
@@ -619,9 +440,6 @@ main() {
     require_root
     parse_args "$@"
     check_os
-    check_dependencies
-    validate_pem "$USE_CERT"
-    require_keytool
 
     if [[ "$ALL_USERS" -eq 1 ]]; then
         local iter_count=0 user home

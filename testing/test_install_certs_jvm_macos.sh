@@ -6,27 +6,24 @@
 #   sudo ./testing/test_install_certs_jvm_macos.sh
 #
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
-# cases 1, 4, 10, 11 (the positive / fresh-state cases) and via `trap EXIT`.
-# Cases 2 (subject mismatch), 3 (idempotency), 5-8 (negative arg / cert),
-# 9 (getenv) and 12 (validate_pem warns) deliberately reuse the prior install
-# state because they assert behavior ON TOP of an installed system.
+# fresh-state cases and via `trap EXIT`. The test runner builds a bundled
+# truststore fixture from the local JDK cacerts plus a lab CA, then verifies the
+# installer only copies that ready-made JKS into place and configures launchd.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
-#   3. Idempotent re-install (single JKS alias after 2 runs; plist replaced)
-#   4. Custom --cert-name round-trips (alias inside JKS = cert-name)
-#   5. Path-traversal --cert-name rejected
-#   6. Malformed PEM rejected
-#   7. Expired CA rejected (skip if openssl can't produce one verifiably-expired)
-#   8. Leaf cert (CA:FALSE) rejected
-#   9. After bootstrap, launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> returns
+#   3. Idempotent re-install (copied JKS checksum stable; plist replaced)
+#   4. Missing --use-truststore is rejected
+#   5. Missing / empty truststore paths are rejected
+#   6. After bootstrap, launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> returns
 #      the JKS path (skip on CI runners with no GUI session)
-#  10. Plist content is well-formed XML and points at the expected JKS path
+#   7. Plist content is well-formed XML and points at the expected JKS path
 #      (covers the install path even when launchctl can't be verified)
-#  11. --all-users iterates /Users/* and installs into every eligible account
+#   8. --all-users iterates /Users/* and installs into every eligible account
 #      (covers the iter_all_users filter + per-user chown contract)
-#  12. validate_pem warn paths: 30-day-expiry warn + multi-cert bundle warn
+#   9. Installed JKS preserves public roots from the bundled truststore
+#  10. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer
 
 set -euo pipefail
 fail_msg() { echo "BUG: $1" >&2; exit 1; }
@@ -59,6 +56,7 @@ JKS="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm/truststore
 JKS_DIR="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm"
 PLIST="${TEST_HOME}/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist"
 LABEL="com.jfrog.package-reroute.jto-env"
+BUNDLE_JKS="/tmp/jvm-mac-bundled-truststore.jks"
 
 echo "Test user: $TEST_USER (uid=$TEST_UID, home=$TEST_HOME)"
 
@@ -67,8 +65,14 @@ cleanup() {
     rm -f "$PLIST"
     rm -rf "$JKS_DIR"
     launchctl asuser "${TEST_UID}" launchctl unsetenv JAVA_TOOL_OPTIONS 2>/dev/null || true
+    rm -f /tmp/jvm-mac-empty-truststore.jks
 }
-trap cleanup EXIT
+
+final_cleanup() {
+    cleanup
+    rm -f "$BUNDLE_JKS"
+}
+trap final_cleanup EXIT
 
 # Pick an OpenSSL implementation that supports `-addext` reliably.
 # macos-latest CI's default `openssl` is LibreSSL, which silently mis-handles
@@ -84,11 +88,72 @@ done
 [[ -n "$OPENSSL" ]] || fail_msg "no real OpenSSL on PATH (need OpenSSL 3.x; LibreSSL does not support -addext)"
 echo "Using openssl: $OPENSSL ($("$OPENSSL" version))"
 
+require_keytool() {
+    command -v keytool >/dev/null 2>&1 || fail_msg "keytool not on PATH (validator/test fixture requires a JDK)"
+}
+
+find_jdk_cacerts() {
+    if [[ -n "${JAVA_HOME:-}" && -f "${JAVA_HOME}/lib/security/cacerts" ]]; then
+        echo "${JAVA_HOME}/lib/security/cacerts"
+        return 0
+    fi
+
+    if [[ -x /usr/libexec/java_home ]]; then
+        local java_home_out
+        java_home_out="$(/usr/libexec/java_home 2>/dev/null || true)"
+        if [[ -n "$java_home_out" && -f "${java_home_out}/lib/security/cacerts" ]]; then
+            echo "${java_home_out}/lib/security/cacerts"
+            return 0
+        fi
+    fi
+
+    local keytool_path resolved link
+    keytool_path="$(command -v keytool 2>/dev/null || true)"
+    if [[ -n "$keytool_path" ]]; then
+        resolved="$keytool_path"
+        local depth=0
+        while [[ -L "$resolved" && $depth -lt 16 ]]; do
+            link="$(readlink "$resolved")"
+            if [[ "$link" = /* ]]; then
+                resolved="$link"
+            else
+                resolved="$(dirname "$resolved")/$link"
+            fi
+            depth=$((depth + 1))
+        done
+        local keytool_dir
+        keytool_dir="$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)"
+        if [[ -n "$keytool_dir" && -f "${keytool_dir}/../lib/security/cacerts" ]]; then
+            echo "${keytool_dir}/../lib/security/cacerts"
+            return 0
+        fi
+    fi
+
+    fail_msg "cannot locate JDK cacerts for bundled truststore fixture"
+}
+
+build_bundle_truststore() {
+    local ca_path="$1" src_cacerts
+    src_cacerts="$(find_jdk_cacerts)"
+    rm -f "$BUNDLE_JKS"
+    cp "$src_cacerts" "$BUNDLE_JKS"
+    chmod 0644 "$BUNDLE_JKS"
+    keytool -importcert -noprompt \
+        -alias package-route-custom-ca \
+        -file "$ca_path" \
+        -keystore "$BUNDLE_JKS" \
+        -storepass changeit >/dev/null
+    echo "Bundled truststore fixture: $BUNDLE_JKS (base: $src_cacerts)"
+}
+
 # Generate the lab CA used by all positive cases.
 "$OPENSSL" req -x509 -newkey rsa:2048 -nodes \
     -keyout /tmp/jvm-mac-test-k.pem -out /tmp/jvm-mac-test-ca.pem -days 7 \
     -subj "/CN=Lab JVM mac CA Test/O=JFrog" \
     -addext "basicConstraints=critical,CA:TRUE" 2>/dev/null
+
+require_keytool
+build_bundle_truststore /tmp/jvm-mac-test-ca.pem
 
 # Capture combined stdout/stderr to a tempfile and only dump it on an
 # *unexpected* exit. Negative tests need silence on the expected-fail path
@@ -137,7 +202,7 @@ echo "=== 1. positive: install + validate ==="
 cleanup
 # Positive cases let stdout through so a CI failure shows a useful log; only
 # negative cases (where we *expect* exit 1) silence both streams.
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-test-ca.pem
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-truststore "$BUNDLE_JKS"
 SUDO_USER="$TEST_USER" ./validate_certs_jvm_macos.sh --expected-subject "Lab JVM mac CA Test"
 echo "  ok"
 
@@ -151,96 +216,57 @@ echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 3. idempotency: 2nd install produces single alias / single plist ==="
-install_as_test_user --use-cert /tmp/jvm-mac-test-ca.pem
+echo "=== 3. idempotency: 2nd install preserves bundled JKS / single plist ==="
+install_as_test_user --use-truststore "$BUNDLE_JKS"
 validate_as_test_user --expected-subject "Lab JVM mac CA Test"
 
+bundle_sha="$(shasum -a 256 "$BUNDLE_JKS" | awk '{print $1}')"
+installed_sha="$(shasum -a 256 "$JKS" | awk '{print $1}')"
+[[ "$installed_sha" == "$bundle_sha" ]] || fail_msg "installed JKS checksum differs from bundled truststore"
 alias_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
     | grep -c "trustedCertEntry" || true)
 alias_count=${alias_count:-0}
-# JKS extends the JDK's bundled cacerts (~150 public roots) plus exactly one
-# corporate-CA alias. After two installs, the corporate alias count must be
-# exactly 1; the JDK-supplied aliases stay constant.
 corp_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
-    | grep -cE "^${CERT_BASENAME:-package-route-custom-ca}[,[:space:]]" || true)
+    | grep -cE "^package-route-custom-ca[,[:space:]]" || true)
 corp_count=${corp_count:-0}
 [[ "$corp_count" -eq 1 ]] || fail_msg "expected exactly 1 corporate-CA alias after 2 installs, got $corp_count"
 [[ "$alias_count" -ge 100 ]] || fail_msg "expected JKS to extend default cacerts (>=100 aliases), got $alias_count"
 [[ -f "$PLIST" ]] || fail_msg "plist missing after 2nd install"
-echo "  ok (alias_count=$alias_count)"
+echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4. custom --cert-name round-trips (alias inside JKS = cert-name) ==="
+echo "=== 4. negative: missing --use-truststore rejected ==="
+if install_as_test_user; then
+    dump_last_log
+    fail_msg "installer should have rejected missing --use-truststore"
+fi
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 5. negative: missing truststore path rejected ==="
+if install_as_test_user --use-truststore /tmp/no-such-jvm-truststore.jks; then
+    dump_last_log
+    fail_msg "installer should have rejected missing truststore path"
+fi
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 6. negative: empty truststore rejected ==="
+: > /tmp/jvm-mac-empty-truststore.jks
+if install_as_test_user --use-truststore /tmp/jvm-mac-empty-truststore.jks; then
+    dump_last_log
+    fail_msg "installer should have rejected empty truststore"
+fi
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 7. launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> ==="
 cleanup
-install_as_test_user --use-cert /tmp/jvm-mac-test-ca.pem --cert-name zscaler-root
-keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
-    | grep -q "^zscaler-root," \
-    || fail_msg "expected JKS alias 'zscaler-root' (got: $(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null | grep trustedCertEntry))"
-validate_as_test_user --expected-subject "Lab JVM mac CA Test"
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 5. negative: path-traversal --cert-name rejected ==="
-if install_as_test_user --use-cert /tmp/jvm-mac-test-ca.pem --cert-name '../etc/pwned'; then
-    dump_last_log
-    fail_msg "installer should have rejected path-traversal --cert-name"
-fi
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 6. negative: malformed PEM rejected ==="
-echo "not a certificate" > /tmp/jvm-mac-bad.pem
-if install_as_test_user --use-cert /tmp/jvm-mac-bad.pem; then
-    dump_last_log
-    fail_msg "installer should have rejected malformed PEM"
-fi
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 7. negative: expired CA rejected ==="
-rm -f /tmp/jvm-mac-expired.pem
-# Try OpenSSL 3.2+'s `-not_before / -not_after`; fall back to negative `-days`.
-"$OPENSSL" req -x509 -newkey rsa:2048 -nodes \
-    -keyout /tmp/jvm-mac-expired-k.pem -out /tmp/jvm-mac-expired.pem \
-    -subj "/CN=Expired/O=JFrog" \
-    -addext "basicConstraints=critical,CA:TRUE" \
-    -not_before 20200101000000Z -not_after 20200201000000Z 2>/dev/null \
-|| "$OPENSSL" x509 -req -in <("$OPENSSL" req -new -key /tmp/jvm-mac-test-k.pem -subj "/CN=Expired") \
-       -signkey /tmp/jvm-mac-test-k.pem -days -1 -out /tmp/jvm-mac-expired.pem 2>/dev/null \
-|| true
-
-if [[ ! -f /tmp/jvm-mac-expired.pem ]] || "$OPENSSL" x509 -in /tmp/jvm-mac-expired.pem -checkend 0 -noout >/dev/null 2>&1; then
-    echo "  SKIP: cannot produce a verifiably expired cert with the installed openssl ($(openssl version))"
-else
-    if install_as_test_user --use-cert /tmp/jvm-mac-expired.pem; then
-        dump_last_log
-        fail_msg "installer should have rejected expired CA"
-    fi
-    echo "  ok"
-fi
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 8. negative: leaf cert (CA:FALSE) rejected ==="
-"$OPENSSL" req -x509 -newkey rsa:2048 -nodes \
-    -keyout /tmp/jvm-mac-leaf-k.pem -out /tmp/jvm-mac-leaf.pem -days 7 \
-    -subj "/CN=Leaf Not CA" \
-    -addext "basicConstraints=critical,CA:FALSE" 2>/dev/null
-if install_as_test_user --use-cert /tmp/jvm-mac-leaf.pem; then
-    dump_last_log
-    fail_msg "installer should have rejected leaf cert (CA:FALSE)"
-fi
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 9. launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> ==="
-cleanup
-install_as_test_user --use-cert /tmp/jvm-mac-test-ca.pem
+install_as_test_user --use-truststore "$BUNDLE_JKS"
 if launchctl print "gui/${TEST_UID}" >/dev/null 2>&1; then
     # Mirror the installer's 20x100ms retry: bootstrap returns the moment
     # the agent is loaded, but the launchctl-setenv ProgramArguments runs
@@ -268,8 +294,8 @@ fi
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 10. plist is well-formed XML and points at the expected JKS ==="
-# Reuses the install from step 9 (no cleanup). Independent of whether
+echo "=== 8. plist is well-formed XML and points at the expected JKS ==="
+# Reuses the install from step 7 (no cleanup). Independent of whether
 # launchctl bootstrap succeeded — validates the write_launch_agent_plist
 # code path even on headless CI runners.
 plutil -lint "$PLIST" >/dev/null
@@ -284,13 +310,13 @@ esac
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 11. --all-users iterates eligible accounts ==="
+echo "=== 9. --all-users iterates eligible accounts ==="
 cleanup
 # CI runners only have a single user (`runner`, uid 501). That's enough to
 # verify iter_all_users does at least one iteration through the filter +
 # per-user-chown path; multi-user is covered by the local dev Mac smoke.
 # Run without SUDO_USER set so the installer takes the --all-users branch.
-out="$(./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-test-ca.pem --all-users 2>&1)"
+out="$(./install_certs_jvm_macos.sh --use-truststore "$BUNDLE_JKS" --all-users 2>&1)"
 echo "$out" | grep -q "=== User: ${TEST_USER}" \
     || { echo "$out" | tail -20; fail_msg "--all-users did not iterate ${TEST_USER}"; }
 echo "$out" | grep -qE "Installed for [0-9]+ user\(s\)" \
@@ -302,93 +328,17 @@ plist_owner="$(stat -f '%Su' "$PLIST")"
 echo "  ok"
 
 #-----------------------------------------------------------------------------
-echo
-echo "=== 12. validate_pem warn paths: 30-day-expiry + bundle ==="
-# Short-validity CA (1 day) — within 30 days, should produce the expiry warn
-# but install succeed.
-"$OPENSSL" req -x509 -newkey rsa:2048 -nodes \
-    -keyout /tmp/jvm-mac-soon-k.pem -out /tmp/jvm-mac-soon.pem -days 1 \
-    -subj "/CN=Soon to Expire/O=JFrog" \
-    -addext "basicConstraints=critical,CA:TRUE" 2>/dev/null
-out="$(SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-soon.pem 2>&1)"
-echo "$out" | grep -q "certificate expires within 30 days" \
-    || { echo "$out" | tail -20; fail_msg "30-day expiry warn missing"; }
-
-# Multi-cert bundle: append a second cert to the test CA. The installer
-# warns and imports only the first; install must still succeed.
-cat /tmp/jvm-mac-test-ca.pem /tmp/jvm-mac-soon.pem > /tmp/jvm-mac-bundle.pem
-out="$(SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-bundle.pem 2>&1)"
-echo "$out" | grep -qE "PEM file contains [0-9]+ certificates" \
-    || { echo "$out" | tail -20; fail_msg "multi-cert bundle warn missing"; }
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 13. negative: missing keytool fails cleanly ==="
-# I3 cross-platform parity: build an isolated bin/ containing symlinks to
-# every /usr/bin and /bin tool EXCEPT keytool, plus openssl from its real
-# location. Then run the installer with PATH=<isolated bin>. macOS-latest
-# CI has /usr/bin/keytool from the Apple-bundled JavaAppletPlugin, and
-# setup-java prepends $JAVA_HOME/bin — neither survives this isolated PATH.
-nokey_bin="$(mktemp -d)"
-for d in /usr/bin /bin /usr/sbin /sbin; do
-    [[ -d "$d" ]] || continue
-    for f in "$d"/*; do
-        base="$(basename "$f")"
-        [[ "$base" == keytool ]] && continue
-        ln -sf "$f" "$nokey_bin/$base" 2>/dev/null || true
-    done
-done
-# openssl may live outside /usr/bin (Homebrew on macOS GHA puts it in
-# /opt/homebrew/bin). Ensure the isolated bin can find a working openssl.
-ln -sf "$OPENSSL" "$nokey_bin/openssl" 2>/dev/null || true
-if ! "$nokey_bin/openssl" version >/dev/null 2>&1; then
-    rm -rf "$nokey_bin"
-    fail_msg "isolated bin missing openssl — cannot exercise missing-keytool path"
-fi
-if [[ -e "$nokey_bin/keytool" ]] || env -i PATH="$nokey_bin" command -v keytool >/dev/null 2>&1; then
-    rm -rf "$nokey_bin"
-    fail_msg "isolated bin still has keytool — test setup broken"
-fi
-if env -i PATH="$nokey_bin" HOME="$HOME" SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-test-ca.pem >/tmp/jvm-mac-nokey.out 2>&1; then
-    cat /tmp/jvm-mac-nokey.out | head -20
-    rm -rf "$nokey_bin"
-    fail_msg "installer should have rejected missing keytool"
-fi
-if ! grep -q -i keytool /tmp/jvm-mac-nokey.out; then
-    cat /tmp/jvm-mac-nokey.out | head -10
-    rm -rf "$nokey_bin"
-    fail_msg "missing-keytool error message should mention 'keytool'"
-fi
-rm -rf "$nokey_bin"
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 14. negative: DER cert rejected (C1 cross-platform parity) ==="
-# C1 backport: convert the lab CA to DER, then attempt install — should
-# fail with a hint to convert back. Mirrors Linux + Windows behavior.
-"$OPENSSL" x509 -in /tmp/jvm-mac-test-ca.pem -outform DER -out /tmp/jvm-mac-test-ca.der 2>/dev/null
-if SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-test-ca.der >/tmp/jvm-mac-der.out 2>&1; then
-    cat /tmp/jvm-mac-der.out | head -10
-    fail_msg "installer should have rejected DER-encoded cert"
-fi
-grep -q -i "PEM-encoded" /tmp/jvm-mac-der.out \
-    || { cat /tmp/jvm-mac-der.out | head -10; fail_msg "DER reject message should mention 'PEM-encoded'"; }
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-# Re-install once so the next three invariants observe the post-fix end state.
+# Re-install once so the next three invariants observe the final end state.
 cleanup
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-cert /tmp/jvm-mac-test-ca.pem >/dev/null
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-truststore "$BUNDLE_JKS" >/dev/null
 
 echo
-echo "=== 15. JKS extends default cacerts (preserves public roots) ==="
+echo "=== 10. JKS extends bundled public roots ==="
 # Regression guard for the "trustStore replaces, not extends" footgun.
 # -Djavax.net.ssl.trustStore in OpenJDK swaps the JVM's trust source; a JKS
 # holding only the corporate CA would break every public-CA TLS handshake
 # (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors).
-# Installer must therefore cp $JAVA_HOME/lib/security/cacerts first.
+# The shipped bundle must therefore include public roots before install.
 alias_count="$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
 alias_count="${alias_count:-0}"
 [[ "$alias_count" -ge 100 ]] \
@@ -396,7 +346,7 @@ alias_count="${alias_count:-0}"
 echo "  ok ($alias_count aliases)"
 
 echo
-echo "=== 16. JKS contains a well-known public root (DigiCert family) ==="
+echo "=== 11. JKS contains a well-known public root (DigiCert family) ==="
 # Spot-check the merge actually happened. DigiCert root certs ship in every
 # JDK's cacerts under several aliases (digicertglobalrootca, digicertglobalrootg2,
 # digicerttrustedrootg4, etc.) — case-insensitive substring match catches them all.
@@ -406,7 +356,7 @@ keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
 echo "  ok"
 
 echo
-echo "=== 17. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
+echo "=== 12. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
 # Direct repro of the "Application Support" space-tokenisation bug. Spawn a
 # child java -version with the LaunchAgent's env var and assert the JVM
 # does NOT print "Unrecognized option" — that's what an unquoted trustStore

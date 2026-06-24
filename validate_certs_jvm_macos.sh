@@ -25,14 +25,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -f "${SCRIPT_DIR}/_jvm_macos_paths.sh" ]]; then
-    echo "Error: _jvm_macos_paths.sh not found next to this validator (${SCRIPT_DIR})." >&2
-    echo "       Invoke as ./validate_certs_jvm_macos.sh — not via 'curl | bash'." >&2
-    exit 1
-fi
-# shellcheck disable=SC1091
-. "${SCRIPT_DIR}/_jvm_macos_paths.sh"
+# Keep this validator self-contained: it is often copied/run as a standalone
+# script during onboarding, so avoid requiring sibling files for constants.
+JKS_RELATIVE_DIR="Library/Application Support/JFrog/package-route-jvm"
+JKS_BASENAME="truststore.jks"
+LAUNCH_AGENT_RELATIVE_DIR="Library/LaunchAgents"
+LAUNCH_AGENT_LABEL="com.jfrog.package-reroute.jto-env"
+LAUNCH_AGENT_BASENAME="${LAUNCH_AGENT_LABEL}.plist"
+JKS_PASSWORD="changeit"
 
 ALL_USERS=0
 EXPECTED_SUBJECT=""

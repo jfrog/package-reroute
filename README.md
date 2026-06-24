@@ -23,7 +23,6 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
 | **install_certs_jvm_macos.sh** | macOS (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS + per-user LaunchAgent setting `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (JKS subject + plist + `launchctl getenv`) |
-| **_jvm_macos_paths.sh** | macOS (JVM) | Shared constants sourced by both installer and validator. Not directly executable. |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
 | **install_certs_jvm_linux.sh** | Linux (JVM) | Install CA for Maven/Gradle/sbt/Ivy: RHEL family → `update-ca-trust extract` into system anchors; others → per-host JKS + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
@@ -33,7 +32,6 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 | **install_certs_jvm_windows.ps1** | Windows (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS at `%LOCALAPPDATA%` + User-scope `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_windows.ps1** | Windows (JVM) | Validate JVM truststore install (JKS subject + User-scope env var) |
-| **_jvm_windows_paths.ps1** | Windows (JVM) | Shared constants dot-sourced by installer + validator. Not directly executable. |
 
 Environment variables by platform (see each section for details):
 
@@ -329,11 +327,11 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 ### Overview
 
-`install_certs_jvm_macos.sh` wires a custom CA certificate into the JVM trust path on macOS so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_macos.sh` if you need those.
+`install_certs_jvm_macos.sh` wires a bundled JVM truststore into the JVM trust path on macOS so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_macos.sh` if you need those.
 
 Single path on macOS — there is no OS-trust fallback because macOS-specific `KeychainStore` is broken per [JDK-8321045](https://bugs.openjdk.org/browse/JDK-8321045). The script:
 
-1. Builds a per-user JKS truststore at `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks` containing only the customer CA.
+1. Copies the supplied JKS truststore to `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
 2. Writes a per-user LaunchAgent plist at `~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist` that calls `launchctl setenv JAVA_TOOL_OPTIONS=…` at `RunAtLoad`.
 3. Bootstraps the agent into `gui/<uid>` via `launchctl bootstrap` so the env var becomes available to every subsequently-launched GUI process (Dock-launched IntelliJ, JetBrains Toolbox, `open -a …`).
 
@@ -343,16 +341,13 @@ The `~/.zshrc` / `~/.bash_profile` shortcut is deliberately NOT used: it silentl
 
 - **macOS**.
 - **Root** (`sudo`) — needed to chown per-user files and to bootstrap into other users' `gui/<uid>` domains under `--all-users`.
-- **`openssl`** on `PATH` (ships with macOS as LibreSSL; full OpenSSL via Homebrew also works).
-- **`keytool`** on `PATH` (provided by any JDK — Homebrew openjdk, Adoptium Temurin, JetBrains JBR, etc.).
 - macOS built-ins used by the installer (all preinstalled on supported macOS versions): `plutil` (LaunchAgent plist validation), `launchctl` (bootstrap into `gui/<uid>`), `dscl` (user / home lookup), `stat` (UID-based filtering under `--all-users`).
 
 ### Options
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validation: parseable X.509, not expired, `CA:TRUE` in basicConstraints. Bundles emit a warning (only the first cert imports). |
-| `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for the JKS alias. Must match `[A-Za-z0-9._-]+`. Pass the same value to the validator (the validator matches by subject so this is informational unless multiple CAs coexist). |
+| `--use-truststore <path>` | **Yes** | Path to an existing JVM truststore (JKS/PKCS12-compatible). The truststore is copied as-is and must be readable by JVMs with password `changeit`. |
 | `--all-users` | No | Iterate `/Users/*` and install the LaunchAgent + JKS for every account with UID ≥ 501. Default = only `SUDO_USER` (or the GUI console user under JAMF). |
 | `-h`, `--help` | — | Usage. |
 
@@ -360,13 +355,10 @@ The `~/.zshrc` / `~/.bash_profile` shortcut is deliberately NOT used: it silentl
 
 ```bash
 # Single user (typical: install for the developer running sudo)
-sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem
+sudo ./install_certs_jvm_macos.sh --use-truststore /tmp/package-route-truststore.jks
 
 # Fleet onboarding (shared Mac with multiple accounts)
-sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem --all-users
-
-# Custom alias for the JKS
-sudo ./install_certs_jvm_macos.sh --use-cert /tmp/ZscalerRoot0.pem --cert-name zscaler-root
+sudo ./install_certs_jvm_macos.sh --use-truststore /tmp/package-route-truststore.jks --all-users
 ```
 
 ### Validation: validate_certs_jvm_macos.sh
@@ -390,7 +382,7 @@ sudo ./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
 - **Gradle Daemon caching.** Run `gradle --stop` after onboarding so the daemon re-reads `JAVA_TOOL_OPTIONS` at next start.
 - **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM startup prints this to stderr. CI parsers that strict-match empty-stderr need to tolerate it.
 - **`changeit` truststore password.** OpenJDK convention; *not* a secret. The JKS holds only public CA certificates and the password protects file integrity, not contents.
-- **JKS extends the JDK's bundled cacerts.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The installer copies `$JAVA_HOME/lib/security/cacerts` to `~/Library/Application Support/JFrog/package-route-jvm/truststore.jks` first, then `keytool -importcert` appends the corporate CA. The resulting store has ~150 public roots **plus** the corporate one.
+- **The supplied JKS must include public roots.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The release process that creates the bundled truststore owns including public roots plus the corporate CA before install.
 - **`JAVA_TOOL_OPTIONS` inner quoting.** The JKS path lives under `~/Library/Application Support/` which contains a space; the JVM tokenises `JAVA_TOOL_OPTIONS` on whitespace and only honours embedded `"…"` grouping. The installer therefore writes `-Djavax.net.ssl.trustStore="<path>" -Djavax.net.ssl.trustStorePassword="changeit"` into the LaunchAgent plist so the literal quotes reach the JVM tokenizer. Older installs (pre-fix) that wrote the unquoted form produced a fatal `Unrecognized option` on every Dock-launched JVM.
 - **`gui/<uid>` domain only exists for logged-in GUI users.** Under `--all-users`, accounts that are not currently logged in get the plist installed but `launchctl bootstrap` is soft-skipped; launchd loads the plist automatically at their next login.
 - **JAMF / headless kiosk caveat.** On a Mac running JAMF policies *before* any user has logged in, `gui/<uid>` is not yet running, so `launchctl bootstrap gui/<uid>` either fails or loads into a non-running domain. The plist will load on first interactive login. For truly headless boxes (rack-mounted Mac mini build agents), pair this installer with a `/Library/LaunchDaemons` (system-scope) trust-bootstrap before the first user login, or run the installer interactively as part of provisioning.
@@ -665,11 +657,11 @@ Use a substring from your CA subject as `<ca-subject-pattern>` (find it with `op
 
 ### Overview
 
-`install_certs_jvm_windows.ps1` wires a custom CA certificate into the JVM trust path on Windows so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_windows.ps1` if you need those.
+`install_certs_jvm_windows.ps1` wires a bundled JVM truststore into the JVM trust path on Windows so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_windows.ps1` if you need those.
 
 Single path on Windows — there is no OS-trust fallback. `-Djavax.net.ssl.trustStoreType=Windows-ROOT` was historically broken under Gradle ([gradle/gradle#6584](https://github.com/gradle/gradle/issues/6584), fixed in Gradle 8.3) and remains less uniform than the JKS recipe across our supported toolchains. The script:
 
-1. Builds a per-user JKS truststore at `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks` containing only the customer CA.
+1. Copies the supplied JKS truststore to `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks`.
 2. Sets `JAVA_TOOL_OPTIONS` at **User** scope via `[Environment]::SetEnvironmentVariable(…, 'User')`, which writes `HKCU\Environment` and broadcasts `WM_SETTINGCHANGE`. New JVM processes started after the broadcast inherit the env var; daemons and long-running IDEs need a fresh session.
 
 **No Administrator required** — the User scope writes to `HKCU\Environment` without elevation, and `%LOCALAPPDATA%` is per-user.
@@ -677,15 +669,12 @@ Single path on Windows — there is no OS-trust fallback. `-Djavax.net.ssl.trust
 ### Requirements
 
 - **Windows** with PowerShell 5.1+.
-- **`keytool.exe`** reachable via `JAVA_HOME` (set by Adoptium / Corretto / Microsoft / Zulu installers and by `actions/setup-java`) or on `PATH`.
-- The cert's syntactic validation (parseable X.509, expiry, `CA:TRUE`) uses .NET's `System.Security.Cryptography.X509Certificates`, so **no `openssl` dependency** for the install path itself.
 
 ### Parameters
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-UseCert <path>` | **Yes** | Path to an existing PEM/CRT certificate file. Validation: parseable X.509, not expired, and if the basicConstraints extension is present then `CA:TRUE` is required (a cert that omits the extension entirely is accepted — matches OpenSSL/keytool default behavior). Bundles emit a warning (only the first cert imports). |
-| `-CertName <name>` | No (default: `package-route-custom-ca`) | Alias under which the CA is stored inside the JKS. Cosmetic — affects only `keytool -list` output. JKS path and env var name are fixed per-user. Must match `[A-Za-z0-9._-]+`. |
+| `-UseTruststore <path>` | **Yes** | Path to an existing JVM truststore (JKS/PKCS12-compatible). The truststore is copied as-is and must be readable by JVMs with password `changeit`. |
 
 No `-AllUsers` (User-scope env var is per-user by construction; each developer runs the installer in their own session). No `-Mode` — we ship only the JKS + `JAVA_TOOL_OPTIONS` recipe; see Caveats for why Windows-ROOT is not exposed.
 
@@ -693,10 +682,7 @@ No `-AllUsers` (User-scope env var is per-user by construction; each developer r
 
 ```powershell
 # Single user
-powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseCert C:\tmp\ZscalerRoot.pem
-
-# Custom alias
-powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseCert C:\tmp\ca.pem -CertName zscaler-root
+powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseTruststore C:\tmp\package-route-truststore.jks
 ```
 
 ### Validation: validate_certs_jvm_windows.ps1
@@ -718,14 +704,14 @@ Exit code 0 if all checks pass, 1 otherwise. Result line is qualified with a cou
 - **Gradle Daemon caching.** Run `gradle --stop` after onboarding so the daemon re-reads `JAVA_TOOL_OPTIONS` at next start.
 - **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM startup prints this to stderr. CI parsers that strict-match empty-stderr need to tolerate it.
 - **`changeit` truststore password.** OpenJDK convention; *not* a secret. The JKS holds only public CA certificates and the password protects file integrity, not contents.
-- **JKS extends the JDK's bundled cacerts.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The installer copies `$env:JAVA_HOME\lib\security\cacerts` to `%LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks` first, then `keytool -importcert` appends the corporate CA. The resulting store has ~150 public roots **plus** the corporate one.
+- **The supplied JKS must include public roots.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The release process that creates the bundled truststore owns including public roots plus the corporate CA before install.
 - **Windows-ROOT trustStoreType is excluded by design.** `-Djavax.net.ssl.trustStoreType=Windows-ROOT` would point JVMs at the system Trusted Root store directly. The Gradle Daemon stale-snapshot bug that historically made this unsafe (gradle/gradle#6584) was fixed in Gradle 8.3 via [gradle/gradle#25106](https://github.com/gradle/gradle/pull/25106), but we still ship only the JKS+`JAVA_TOOL_OPTIONS` recipe so that (a) the trust source is uniform across Linux/macOS/Windows, and (b) developers on Gradle < 8.3 are not silently affected. A future ticket could add a `-TrustStoreType Windows-ROOT` flag for organisations standardised on Gradle ≥ 8.3.
 - **Machine scope is excluded.** v1 is User-scope only. Fleet/Intune rollouts that need `HKLM\Environment` should re-run the script per user via a logon script or use a future `-Scope Machine` flag (separate ticket).
 - **`%USERPROFILE%\.gradle\jdks\`** is Gradle's auto-provisioned JDK location. It's covered for free because `JAVA_TOOL_OPTIONS` is read by *every* JVM the user launches, regardless of where the JDK came from — subject to the Gradle Daemon caveat above (the daemon caches its environment at startup, so a newly-provisioned toolchain JDK only picks up `JAVA_TOOL_OPTIONS` after `gradle --stop`).
 
 ### Testing
 
-`./testing/test_install_certs_jvm_windows.ps1` runs the 10-invariant smoke matrix on `windows-latest` in CI and locally. Each run targets the current user's `%LOCALAPPDATA%` + `HKCU` and cleans up via try/finally.
+`./testing/test_install_certs_jvm_windows.ps1` runs the smoke matrix on `windows-latest` in CI and locally. Each run targets the current user's `%LOCALAPPDATA%` + `HKCU`, builds a bundled truststore fixture, and cleans up via try/finally.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File testing\test_install_certs_jvm_windows.ps1
