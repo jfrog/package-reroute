@@ -184,37 +184,71 @@ function Convert-CertToPemBlock {
     return "-----BEGIN CERTIFICATE-----`n" + [System.Convert]::ToBase64String($Cert.RawData, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END CERTIFICATE-----"
 }
 
-function Add-PemBlockToBundleList {
-    param([string]$PemBlock, [System.Collections.ArrayList]$Blocks, [hashtable]$SeenFingerprints)
-    if ([string]::IsNullOrWhiteSpace($PemBlock)) { return 0 }
-    $fp = Get-PemFingerprint -PemBlock $PemBlock
-    if (-not $fp) { return 0 }
-    if ($SeenFingerprints.ContainsKey($fp)) { return 0 }
-    $SeenFingerprints[$fp] = $true
-    [void]$Blocks.Add($PemBlock)
+function Add-CertToBundleList {
+    param(
+        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert,
+        [System.Collections.ArrayList]$Blocks,
+        [hashtable]$SeenThumbprints
+    )
+    if (-not $Cert) { return 0 }
+    $thumb = $Cert.Thumbprint
+    if ([string]::IsNullOrWhiteSpace($thumb)) { return 0 }
+    if ($SeenThumbprints.ContainsKey($thumb)) { return 0 }
+    $pem = Convert-CertToPemBlock -Cert $Cert
+    if ([string]::IsNullOrWhiteSpace($pem)) { return 0 }
+    $SeenThumbprints[$thumb] = $true
+    [void]$Blocks.Add($pem)
     return 1
+}
+
+function Get-CertsFromWindowsStore {
+    param(
+        [System.Security.Cryptography.X509Certificates.StoreLocation]$Location,
+        [System.Security.Cryptography.X509Certificates.StoreName]$Name
+    )
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($Name, $Location)
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+        return @($store.Certificates)
+    } catch {
+        return @()
+    } finally {
+        $store.Close()
+    }
 }
 
 # Export all trusted CAs from Windows trust stores (same idea as macOS keychain dump).
 function Get-WindowsTrustStorePemBlocks {
     $bundleBlocks = New-Object System.Collections.ArrayList
     $seen = @{}
-    foreach ($storePath in @(
-        "Cert:\LocalMachine\Root",
-        "Cert:\LocalMachine\AuthRoot",
-        "Cert:\LocalMachine\CA",
-        "Cert:\CurrentUser\Root",
-        "Cert:\CurrentUser\CA"
-    )) {
-        if (-not (Test-Path $storePath)) { continue }
-        foreach ($cert in @(Get-ChildItem $storePath -ErrorAction SilentlyContinue)) {
-            $pem = Convert-CertToPemBlock -Cert $cert
-            if ($pem) {
-                Add-PemBlockToBundleList -PemBlock $pem -Blocks $bundleBlocks -SeenFingerprints $seen | Out-Null
+    $stores = @(
+        @{ Location = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine; Name = [System.Security.Cryptography.X509Certificates.StoreName]::Root },
+        @{ Location = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine; Name = [System.Security.Cryptography.X509Certificates.StoreName]::AuthRoot },
+        @{ Location = [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine; Name = [System.Security.Cryptography.X509Certificates.StoreName]::CertificateAuthority },
+        @{ Location = [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser; Name = [System.Security.Cryptography.X509Certificates.StoreName]::Root },
+        @{ Location = [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser; Name = [System.Security.Cryptography.X509Certificates.StoreName]::CertificateAuthority }
+    )
+    foreach ($s in $stores) {
+        foreach ($cert in Get-CertsFromWindowsStore -Location $s.Location -Name $s.Name) {
+            Add-CertToBundleList -Cert $cert -Blocks $bundleBlocks -SeenThumbprints $seen | Out-Null
+        }
+    }
+    if ($bundleBlocks.Count -eq 0) {
+        Import-Module Microsoft.PowerShell.Security -ErrorAction SilentlyContinue
+        foreach ($storePath in @(
+            "Cert:\LocalMachine\Root",
+            "Cert:\LocalMachine\AuthRoot",
+            "Cert:\LocalMachine\CA",
+            "Cert:\CurrentUser\Root",
+            "Cert:\CurrentUser\CA"
+        )) {
+            if (-not (Test-Path $storePath)) { continue }
+            foreach ($cert in @(Get-ChildItem $storePath -ErrorAction SilentlyContinue)) {
+                Add-CertToBundleList -Cert $cert -Blocks $bundleBlocks -SeenThumbprints $seen | Out-Null
             }
         }
     }
-    return $bundleBlocks.ToArray()
+    return @($bundleBlocks.ToArray())
 }
 
 function Test-DeployableUserProfile {
