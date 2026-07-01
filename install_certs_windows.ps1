@@ -1,26 +1,26 @@
 # (c) JFrog Ltd. (2026)
-# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm and/or Python for Windows
+# Auto-Extract certificate from Windows store (or use existing PEM) and configure Node/npm, Python, and/or Ruby for Windows
 # Run: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|python|huggingface|all
-#     npm / python / huggingface / all (all = npm + python TLS + Hugging Face Hub)
+#   -Package npm|python|huggingface|ruby|all
+#     npm / python / huggingface / ruby / all (all = npm + Python TLS + Ruby + Hugging Face Hub)
 #   -CertName <pattern>    Substring to match cert subject (errors if 0 or >1 match). Requires -ExtractPath. Cannot be used with -UseCert.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each user's profile or absolute. Requires -CertName.
 #   -UseCert <path>        Path to an existing PEM cert file. Cannot be used with -CertName/-ExtractPath.
 #
 # Either (-CertName AND -ExtractPath) OR -UseCert must be provided.
-# If user had a different env path, it is replaced with the new path; new PEM is first, other PEMs from the old file are appended (dedupe by fingerprint).
+# If user had a different env path, it is replaced with the new path; custom PEM is first, Windows roots and other PEMs from old files are appended (dedupe by fingerprint).
 #
 # Must run as Administrator (or SYSTEM). Exits with error otherwise.
 # When run as SYSTEM/admin with -CertName: installs PEM and User-level env per user (each user's profile).
-# When run with -UseCert: sets Machine-level env to that path; no per-user PEM.
+# When run with -UseCert: sets Machine-level env; Python/Ruby use a generated Machine-level bundle under ProgramData.
 # Also performs best-effort Docker Hub credential cleanup for the current user.
 
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("npm", "python", "huggingface", "all")]
+    [ValidateSet("npm", "python", "huggingface", "ruby", "all")]
     [string]$Package = "all",
 
     [Parameter(ParameterSetName = "Extract", Mandatory = $true)]
@@ -48,6 +48,8 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 function DoNpm { $Package -eq 'npm' -or $Package -eq 'all' }
 function DoPythonTls { $Package -eq 'python' -or $Package -eq 'huggingface' -or $Package -eq 'all' }
 function DoHuggingface { $Package -eq 'huggingface' -or $Package -eq 'all' }
+function DoRuby { $Package -eq 'ruby' -or $Package -eq 'all' }
+function DoOpenSslBundle { (DoPythonTls) -or (DoRuby) }
 
 $DockerHubKeys = @(
     "https://index.docker.io/v1/",
@@ -256,6 +258,88 @@ function Write-MergedPemFile {
     if ($savedTarget -and (Test-Path -LiteralPath $savedTarget -PathType Leaf)) { Remove-Item -LiteralPath $savedTarget -Force -ErrorAction SilentlyContinue }
 }
 
+function Convert-CertToPemBlock {
+    param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert)
+    if (-not $Cert) { return $null }
+    return "-----BEGIN CERTIFICATE-----`n" + [System.Convert]::ToBase64String($Cert.RawData, [System.Base64FormattingOptions]::InsertLineBreaks) + "`n-----END CERTIFICATE-----"
+}
+
+function Add-PemBlockToBundleList {
+    param([string]$PemBlock, [System.Collections.ArrayList]$Blocks, [hashtable]$SeenFingerprints)
+    if ([string]::IsNullOrWhiteSpace($PemBlock)) { return 0 }
+    $fp = Get-PemFingerprint -PemBlock $PemBlock
+    if (-not $fp) { return 0 }
+    if ($SeenFingerprints.ContainsKey($fp)) { return 0 }
+    $SeenFingerprints[$fp] = $true
+    [void]$Blocks.Add($PemBlock)
+    return 1
+}
+
+function Get-WindowsRootPemBlocks {
+    $blocks = New-Object System.Collections.ArrayList
+    foreach ($storePath in @("Cert:\LocalMachine\Root", "Cert:\CurrentUser\Root")) {
+        if (-not (Test-Path $storePath)) { continue }
+        foreach ($cert in @(Get-ChildItem $storePath -ErrorAction SilentlyContinue)) {
+            $pem = Convert-CertToPemBlock -Cert $cert
+            if ($pem) { [void]$blocks.Add($pem) }
+        }
+    }
+    return $blocks.ToArray()
+}
+
+function Write-CombinedPemBundle {
+    param([string]$TargetPath, [string[]]$CustomPemBlocks, [string[]]$OldPaths)
+    $TargetPath = [System.IO.Path]::GetFullPath($TargetPath)
+    $targetDir = Split-Path -Parent $TargetPath
+    if (-not (Test-Path -LiteralPath $targetDir -PathType Container)) {
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+    }
+    $savedTarget = $null
+    if (Test-Path -LiteralPath $TargetPath -PathType Leaf) {
+        $content = [System.IO.File]::ReadAllText($TargetPath, $utf8NoBom)
+        if ($content.Length -gt 0) {
+            $savedTarget = [System.IO.Path]::GetTempFileName()
+            [System.IO.File]::WriteAllText($savedTarget, $content, $utf8NoBom)
+        }
+    }
+
+    $bundleBlocks = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($block in $CustomPemBlocks) {
+        Add-PemBlockToBundleList -PemBlock $block -Blocks $bundleBlocks -SeenFingerprints $seen | Out-Null
+    }
+
+    $windowsRootCount = 0
+    foreach ($block in Get-WindowsRootPemBlocks) {
+        $windowsRootCount += Add-PemBlockToBundleList -PemBlock $block -Blocks $bundleBlocks -SeenFingerprints $seen
+    }
+
+    if ($savedTarget -and (Test-Path -LiteralPath $savedTarget -PathType Leaf)) {
+        foreach ($block in Get-PemBlocksFromFile -Path $savedTarget) {
+            Add-PemBlockToBundleList -PemBlock $block -Blocks $bundleBlocks -SeenFingerprints $seen | Out-Null
+        }
+    }
+
+    foreach ($p in $OldPaths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        if (Test-SamePath -Path1 $p -Path2 $TargetPath) { continue }
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        foreach ($block in Get-PemBlocksFromFile -Path $p) {
+            Add-PemBlockToBundleList -PemBlock $block -Blocks $bundleBlocks -SeenFingerprints $seen | Out-Null
+        }
+    }
+
+    if ($bundleBlocks.Count -eq 0) {
+        if ($savedTarget -and (Test-Path -LiteralPath $savedTarget -PathType Leaf)) { Remove-Item -LiteralPath $savedTarget -Force -ErrorAction SilentlyContinue }
+        Write-Host "[Error] Could not build a PEM bundle: no valid certificates found." -ForegroundColor Red
+        exit 1
+    }
+
+    [System.IO.File]::WriteAllText($TargetPath, (($bundleBlocks.ToArray()) -join "`n"), $utf8NoBom)
+    if ($savedTarget -and (Test-Path -LiteralPath $savedTarget -PathType Leaf)) { Remove-Item -LiteralPath $savedTarget -Force -ErrorAction SilentlyContinue }
+    Write-Host "   + Wrote combined PEM bundle ($($bundleBlocks.Count) certs, $windowsRootCount from Windows roots): $TargetPath"
+}
+
 # Get current env var value for the given scope (Machine or User).
 function Get-EnvPath {
     param([string]$VarName, [string]$Scope)
@@ -265,15 +349,17 @@ function Get-EnvPath {
     return $val
 }
 
-# Get User env paths (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE) for a user by loading their registry hive. Returns array of existing file paths.
+# Get User env paths (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE) for a user by loading their registry hive. Returns array of existing file paths.
 function Get-UserEnvCertPaths {
     param([string]$ProfilePath, [string]$Scope)
     if ($Scope -eq "Machine") { return @() }
     $paths = @()
     $nodePath = Get-EnvPath -VarName "NODE_EXTRA_CA_CERTS" -Scope "User"
     $pipPath = Get-EnvPath -VarName "REQUESTS_CA_BUNDLE" -Scope "User"
+    $sslPath = Get-EnvPath -VarName "SSL_CERT_FILE" -Scope "User"
     if ($nodePath -and (Test-Path -LiteralPath $nodePath -PathType Leaf) -and $paths -notcontains $nodePath) { $paths += $nodePath }
     if ($pipPath -and (Test-Path -LiteralPath $pipPath -PathType Leaf) -and $paths -notcontains $pipPath) { $paths += $pipPath }
+    if ($sslPath -and (Test-Path -LiteralPath $sslPath -PathType Leaf) -and $paths -notcontains $sslPath) { $paths += $sslPath }
     return $paths
 }
 
@@ -310,8 +396,10 @@ function Get-OtherUserEnvCertPaths {
         if (Test-Path -LiteralPath $keyPath) {
             $nodePath = (Get-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -ErrorAction SilentlyContinue).NODE_EXTRA_CA_CERTS
             $pipPath = (Get-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -ErrorAction SilentlyContinue).REQUESTS_CA_BUNDLE
+            $sslPath = (Get-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -ErrorAction SilentlyContinue).SSL_CERT_FILE
             if ($nodePath -and (Test-Path -LiteralPath $nodePath -PathType Leaf) -and $paths -notcontains $nodePath) { $paths += $nodePath }
             if ($pipPath -and (Test-Path -LiteralPath $pipPath -PathType Leaf) -and $paths -notcontains $pipPath) { $paths += $pipPath }
+            if ($sslPath -and (Test-Path -LiteralPath $sslPath -PathType Leaf) -and $paths -notcontains $sslPath) { $paths += $sslPath }
         }
     } finally {
         if ($weLoaded -and $tempKey) { & reg.exe unload "HKU\$tempKey" 2>&1 | Out-Null }
@@ -321,7 +409,7 @@ function Get-OtherUserEnvCertPaths {
 
 # Set User env vars for another user. If hive already loaded use HKU\<SID>; else load NTUSER.DAT.
 function Set-OtherUserEnvVars {
-    param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPythonTls, [bool]$DoHuggingface)
+    param([string]$ProfilePath, [string]$CertPath, [string]$BundlePath, [bool]$DoNpm, [bool]$DoPythonTls, [bool]$DoHuggingface, [bool]$DoRuby)
     $sid = Get-UserSidFromProfile -ProfilePath $ProfilePath
     $keyPath = $null
     $weLoaded = $false
@@ -345,7 +433,11 @@ function Set-OtherUserEnvVars {
         }
         if ($DoPythonTls) {
             Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $BundlePath -Type String -Force
+            Set-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -Value $BundlePath -Type String -Force
+        }
+        if ($DoRuby) {
+            Set-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -Value $BundlePath -Type String -Force
         }
         if ($DoHuggingface) {
             Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
@@ -380,6 +472,8 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
 }
 
 $certStore = if ($isSystemContext -or $isAdmin) { "LocalMachine" } else { "CurrentUser" }
+$programDataRoot = if ($env:PACKAGE_REROUTE_PROGRAMDATA) { $env:PACKAGE_REROUTE_PROGRAMDATA } elseif ($env:ProgramData) { $env:ProgramData } else { "C:\ProgramData" }
+$machineBundlePath = Join-Path (Join-Path $programDataRoot "package-reroute") "package-route-bundle.pem"
 
 # --- Extract from store (when -CertName -ExtractPath): get PEM once ---
 
@@ -408,12 +502,15 @@ if ($PSCmdlet.ParameterSetName -eq "Extract") {
 
 # --- Per-user install when Extract: PEM and User env per user ---
 
-# Under each user's profile: strip leading slashes; if path is absolute, use path relative to drive so we still get per-user dir (e.g. C:\certs -> certs).
-$extractPathTrim = $ExtractPath.TrimStart('\', '/')
-if ([System.IO.Path]::IsPathRooted($extractPathTrim)) {
-    $extractPathTrim = $extractPathTrim.TrimStart([System.IO.Path]::GetPathRoot($extractPathTrim)).TrimStart('\', '/')
+$extractPathTrim = "certs"
+if ($PSCmdlet.ParameterSetName -eq "Extract") {
+    # Under each user's profile: strip leading slashes; if path is absolute, use path relative to drive so we still get per-user dir (e.g. C:\certs -> certs).
+    $extractPathTrim = $ExtractPath.TrimStart('\', '/')
+    if ([System.IO.Path]::IsPathRooted($extractPathTrim)) {
+        $extractPathTrim = $extractPathTrim.TrimStart([System.IO.Path]::GetPathRoot($extractPathTrim)).TrimStart('\', '/')
+    }
+    if ([string]::IsNullOrWhiteSpace($extractPathTrim)) { $extractPathTrim = "certs" }
 }
-if ([string]::IsNullOrWhiteSpace($extractPathTrim)) { $extractPathTrim = "certs" }
 
 if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
     if ($isSystemContext -or $isAdmin) {
@@ -425,12 +522,16 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
             $certPath = Join-Path $certDir "package-route.pem"
             $oldPaths = Get-OtherUserEnvCertPaths -ProfilePath $userHome
             if (-not (Test-Path $certDir)) { New-Item -ItemType Directory -Path $certDir -Force | Out-Null }
-            Write-MergedPemFile -TargetPath $certPath -NewPem $extractedPem -OldPaths $oldPaths
+            if (DoOpenSslBundle) {
+                Write-CombinedPemBundle -TargetPath $certPath -CustomPemBlocks @($extractedPem) -OldPaths $oldPaths
+            } else {
+                Write-MergedPemFile -TargetPath $certPath -NewPem $extractedPem -OldPaths $oldPaths
+            }
             if (-not (Test-ValidPemFile -Path $certPath)) {
                 Write-Host "[Error] Extracted PEM file is invalid: $certPath" -ForegroundColor Red
                 exit 1
             }
-            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoHuggingface:(DoHuggingface)
+            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -BundlePath $certPath -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoHuggingface:(DoHuggingface) -DoRuby:(DoRuby)
             Write-Host "   + $userHome : $certPath"
         }
     } else {
@@ -439,7 +540,11 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         $certPath = Join-Path $certDir "package-route.pem"
         $oldPaths = Get-UserEnvCertPaths -ProfilePath $env:USERPROFILE -Scope "User"
         if (-not (Test-Path $certDir)) { New-Item -ItemType Directory -Path $certDir -Force | Out-Null }
-        Write-MergedPemFile -TargetPath $certPath -NewPem $extractedPem -OldPaths $oldPaths
+        if (DoOpenSslBundle) {
+            Write-CombinedPemBundle -TargetPath $certPath -CustomPemBlocks @($extractedPem) -OldPaths $oldPaths
+        } else {
+            Write-MergedPemFile -TargetPath $certPath -NewPem $extractedPem -OldPaths $oldPaths
+        }
         if (-not (Test-ValidPemFile -Path $certPath)) {
             Write-Host "[Error] Extracted PEM file is invalid: $certPath" -ForegroundColor Red
             exit 1
@@ -451,16 +556,21 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
         if (DoPythonTls) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $certPath, "User")
+            [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $certPath, "User")
+        }
+        if (DoRuby) {
+            [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $certPath, "User")
         }
         if (DoHuggingface) {
             [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", "User")
             [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", "User")
         }
-        Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set."
+        if (DoNpm) { Write-Host "   + NODE_USE_SYSTEM_CA and NODE_EXTRA_CA_CERTS set." }
         if (DoPythonTls) {
-            Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $certPath"
+            Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE and SSL_CERT_FILE set to $certPath"
         }
+        if ((DoRuby) -and -not (DoPythonTls)) { Write-Host "   + SSL_CERT_FILE set to $certPath" }
         if (DoHuggingface) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
     }
     # Only clear the other scope after new User vars are set (above); on failure we exit 1 before reaching here.
@@ -472,6 +582,9 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
     if (DoPythonTls) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "Machine")
+        [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $null, "Machine")
+    } elseif (DoRuby) {
+        [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $null, "Machine")
     }
     Write-Host "   + Cleared Machine-level cert vars so only User settings apply."
 }
@@ -480,6 +593,24 @@ if ($PSCmdlet.ParameterSetName -eq "Extract" -and $null -ne $extractedPem) {
 
 if ($PSCmdlet.ParameterSetName -eq "UseCert") {
     $envScope = if ($isSystemContext -or $isAdmin) { "Machine" } else { "User" }
+    $bundlePath = $UseCert
+    if (DoOpenSslBundle) {
+        $oldBundlePaths = @()
+        foreach ($scope in @("Machine", "User")) {
+            foreach ($var in @("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")) {
+                $oldPath = Get-EnvPath -VarName $var -Scope $scope
+                if ($oldPath -and (Test-Path -LiteralPath $oldPath -PathType Leaf) -and $oldBundlePaths -notcontains $oldPath) {
+                    $oldBundlePaths += $oldPath
+                }
+            }
+        }
+        $bundlePath = if ($envScope -eq "Machine") { $machineBundlePath } else { Join-Path (Join-Path $env:USERPROFILE "certs") "package-route-bundle.pem" }
+        Write-CombinedPemBundle -TargetPath $bundlePath -CustomPemBlocks @(Get-PemBlocksFromFile -Path $UseCert) -OldPaths $oldBundlePaths
+        if (-not (Test-ValidPemFile -Path $bundlePath)) {
+            Write-Host "[Error] Generated PEM bundle is invalid: $bundlePath" -ForegroundColor Red
+            exit 1
+        }
+    }
     Write-Host "[2/4] Setting Environment Variables ($envScope)..."
     if (DoNpm) {
         [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", "1", $envScope)
@@ -488,14 +619,19 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
     }
     if (DoPythonTls) {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", "1", $envScope)
-        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $UseCert, $envScope)
-        Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE set to $UseCert"
+        [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $bundlePath, $envScope)
+        [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $bundlePath, $envScope)
+        Write-Host "   + UV_NATIVE_TLS set; REQUESTS_CA_BUNDLE and SSL_CERT_FILE set to $bundlePath"
         if (DoHuggingface) {
             [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", $envScope)
             [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "86400", $envScope)
             [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "86400", $envScope)
             Write-Host "   + HF_HUB_DISABLE_XET and HF Hub timeouts set."
         }
+    }
+    if ((DoRuby) -and -not (DoPythonTls)) {
+        [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $bundlePath, $envScope)
+        Write-Host "   + SSL_CERT_FILE set to $bundlePath"
     }
     # Only clear the other scope after new vars are set above (so we never leave user with no cert vars on failure).
     # When setting Machine, remove User-level cert vars so they don't override (User wins over Machine on Windows).
@@ -507,6 +643,9 @@ if ($PSCmdlet.ParameterSetName -eq "UseCert") {
         if (DoPythonTls) {
             [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $null, "User")
             [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $null, "User")
+            [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $null, "User")
+        } elseif (DoRuby) {
+            [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $null, "User")
         }
         Write-Host "   + Cleared User-level cert vars so Machine settings apply."
     }
@@ -518,7 +657,11 @@ Write-Host "---------------------------------------------------"
 Write-Host "[4/4] COMPLETE!"
 Write-Host ""
 if ($PSCmdlet.ParameterSetName -eq "UseCert") {
-    Write-Host "Using existing cert at $UseCert. Users must start new terminals to pick up changes."
+    if (DoOpenSslBundle) {
+        Write-Host "Using existing cert at $UseCert; Python/Ruby OpenSSL-style clients use bundle $bundlePath. Users must start new terminals to pick up changes."
+    } else {
+        Write-Host "Using existing cert at $UseCert. Users must start new terminals to pick up changes."
+    }
 } elseif ($isSystemContext -or $isAdmin) {
     Write-Host "Certificate exported to each user's profile (package-route.pem). User-level env set per user. Users must start new terminals to pick up changes."
 } else {
