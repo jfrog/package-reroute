@@ -217,31 +217,110 @@ function Get-WindowsTrustStorePemBlocks {
     return $bundleBlocks.ToArray()
 }
 
+function Test-DeployableUserProfile {
+    param([string]$ProfilePath)
+    $name = Split-Path -Leaf $ProfilePath
+    if ($name -in @('Public', 'Default', 'Default User', 'All Users')) { return $false }
+    if (-not (Test-Path -LiteralPath $ProfilePath -PathType Container)) { return $false }
+    $ntuser = Join-Path $ProfilePath 'NTUSER.DAT'
+    return (Test-Path -LiteralPath $ntuser -PathType Leaf)
+}
+
 function Write-TrustStorePemFile {
     param([string]$TargetPath, [string[]]$PemBlocks)
     $TargetPath = [System.IO.Path]::GetFullPath($TargetPath)
     $targetDir = Split-Path -Parent $TargetPath
     if (-not (Test-Path -LiteralPath $targetDir -PathType Container)) {
-        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
     }
     if ($PemBlocks.Count -eq 0) {
-        Write-Host "[Error] Could not build a PEM bundle: no valid certificates found in Windows trust stores." -ForegroundColor Red
-        exit 1
+        throw "No valid certificates to write."
     }
     [System.IO.File]::WriteAllText($TargetPath, (($PemBlocks) -join "`n"), $utf8NoBom)
 }
 
 function Get-UserSidFromProfile {
     param([string]$ProfilePath)
+    $normalized = ([System.IO.Path]::GetFullPath($ProfilePath)).TrimEnd('\').ToLowerInvariant()
     try {
-        $prof = Get-WmiObject Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object { $_.LocalPath -eq $ProfilePath } | Select-Object -First 1
-        if ($prof) { return $prof.SID }
+        $profiles = Get-CimInstance Win32_UserProfile -ErrorAction Stop
+        foreach ($prof in $profiles) {
+            if ($prof.LocalPath -and ($prof.LocalPath.TrimEnd('\').ToLowerInvariant() -eq $normalized)) {
+                return $prof.SID
+            }
+        }
     } catch { }
+    $listKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($sub in Get-ChildItem -Path $listKey -ErrorAction SilentlyContinue) {
+        $imagePath = (Get-ItemProperty -Path $sub.PSPath -Name ProfileImagePath -ErrorAction SilentlyContinue).ProfileImagePath
+        if ($imagePath -and ($imagePath.TrimEnd('\').ToLowerInvariant() -eq $normalized)) {
+            return Split-Path -Leaf $sub.PSPath
+        }
+    }
     return $null
+}
+
+function Test-SameProfilePath {
+    param([string]$A, [string]$B)
+    if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+    $fullA = ([System.IO.Path]::GetFullPath($A)).TrimEnd('\')
+    $fullB = ([System.IO.Path]::GetFullPath($B)).TrimEnd('\')
+    return $fullA.Equals($fullB, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Send-EnvironmentChangeNotification {
+    if (-not ("NativeMethods" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class NativeMethods {
+    [DllImport("user32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+        uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+}
+"@ -ErrorAction SilentlyContinue | Out-Null
+    }
+    if ("NativeMethods" -as [type]) {
+        $result = [UIntPtr]::Zero
+        [void][NativeMethods]::SendMessageTimeout(
+            [IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, "Environment",
+            0x0002, 5000, [ref]$result)
+    }
+}
+
+function Set-UserEnvRegistryValues {
+    param([string]$KeyPath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPythonTls, [bool]$DoHuggingface, [bool]$DoRuby)
+    if (-not (Test-Path -LiteralPath $KeyPath)) {
+        New-Item -Path $KeyPath -Force -ErrorAction Stop | Out-Null
+    }
+    if ($DoNpm) {
+        Set-ItemProperty -Path $KeyPath -Name "NODE_USE_SYSTEM_CA" -Value "1" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "NODE_EXTRA_CA_CERTS" -Value $CertPath -Type String -Force
+    }
+    if ($DoPythonTls) {
+        Set-ItemProperty -Path $KeyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "UV_SYSTEM_CERTS" -Value "true" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "SSL_CERT_FILE" -Value $CertPath -Type String -Force
+    }
+    if ($DoRuby) {
+        Set-ItemProperty -Path $KeyPath -Name "SSL_CERT_FILE" -Value $CertPath -Type String -Force
+    }
+    if ($DoHuggingface) {
+        Set-ItemProperty -Path $KeyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400" -Type String -Force
+    }
 }
 
 function Set-OtherUserEnvVars {
     param([string]$ProfilePath, [string]$CertPath, [bool]$DoNpm, [bool]$DoPythonTls, [bool]$DoHuggingface, [bool]$DoRuby)
+    if (Test-SameProfilePath -A $ProfilePath -B $env:USERPROFILE) {
+        Set-CurrentUserCertEnvVars -CertPath $CertPath -DoNpm:$DoNpm -DoPythonTls:$DoPythonTls -DoHuggingface:$DoHuggingface -DoRuby:$DoRuby
+        Send-EnvironmentChangeNotification
+        return
+    }
     $sid = Get-UserSidFromProfile -ProfilePath $ProfilePath
     $keyPath = $null
     $weLoaded = $false
@@ -250,33 +329,19 @@ function Set-OtherUserEnvVars {
         $keyPath = "Registry::HKEY_USERS\$sid\Environment"
     } else {
         $ntuser = Join-Path $ProfilePath "NTUSER.DAT"
-        if (-not (Test-Path -LiteralPath $ntuser -PathType Leaf)) { return }
+        if (-not (Test-Path -LiteralPath $ntuser -PathType Leaf)) {
+            throw "Cannot set env vars: no SID and no NTUSER.DAT at $ProfilePath"
+        }
         $tempKey = "temp_env_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
-        $result = & reg.exe load "HKU\$tempKey" "$ntuser" 2>&1
-        if ($LASTEXITCODE -ne 0) { return }
+        & reg.exe load "HKU\$tempKey" "$ntuser" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Cannot set env vars: failed to load NTUSER.DAT for $ProfilePath (user may be logged in elsewhere)"
+        }
         $weLoaded = $true
         $keyPath = "Registry::HKEY_USERS\$tempKey\Environment"
     }
     try {
-        if (-not (Test-Path -LiteralPath $keyPath)) { New-Item -Path $keyPath -Force | Out-Null }
-        if ($DoNpm) {
-            Set-ItemProperty -Path $keyPath -Name "NODE_USE_SYSTEM_CA" -Value "1" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -Value $CertPath -Type String -Force
-        }
-        if ($DoPythonTls) {
-            Set-ItemProperty -Path $keyPath -Name "UV_NATIVE_TLS" -Value "1" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "UV_SYSTEM_CERTS" -Value "true" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -Value $CertPath -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -Value $CertPath -Type String -Force
-        }
-        if ($DoRuby) {
-            Set-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -Value $CertPath -Type String -Force
-        }
-        if ($DoHuggingface) {
-            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
-            Set-ItemProperty -Path $keyPath -Name "HF_HUB_DOWNLOAD_TIMEOUT" -Value "86400" -Type String -Force
-        }
+        Set-UserEnvRegistryValues -KeyPath $keyPath -CertPath $CertPath -DoNpm:$DoNpm -DoPythonTls:$DoPythonTls -DoHuggingface:$DoHuggingface -DoRuby:$DoRuby
     } finally {
         if ($weLoaded -and $tempKey) { & reg.exe unload "HKU\$tempKey" 2>&1 | Out-Null }
     }
@@ -378,7 +443,7 @@ if ($certMode -eq "UseCert") {
 
 $trustStoreBlocks = $null
 if ($certMode -eq "Extract") {
-    $trustStoreBlocks = Get-WindowsTrustStorePemBlocks
+    $trustStoreBlocks = @(Get-WindowsTrustStorePemBlocks)
     if ($trustStoreBlocks.Count -eq 0) {
         Write-Host "[Error] No certificates found in Windows trust stores." -ForegroundColor Red
         exit 1
@@ -398,19 +463,34 @@ if ($certMode -eq "Extract") {
 if ($certMode -eq "Extract") {
     if ($isSystemContext -or $isAdmin) {
         Write-Host "[2/4] Deploying cert bundle and User-level env per user..."
-        $userDirs = Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @('Public', 'Default', 'Default User') }
+        $userDirs = @(Get-ChildItem -Path "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { Test-DeployableUserProfile -ProfilePath $_.FullName })
+        if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE -PathType Container)) {
+            $currentProfile = Get-Item -LiteralPath $env:USERPROFILE
+            if ($userDirs.FullName -notcontains $currentProfile.FullName) {
+                $userDirs = @($currentProfile) + $userDirs
+            }
+        }
+        $deployedCount = 0
         foreach ($ud in $userDirs) {
             $userHome = $ud.FullName
             $certDir = Join-Path $userHome $extractPathTrim
             $certPath = Join-Path $certDir "package-route.pem"
-            Write-TrustStorePemFile -TargetPath $certPath -PemBlocks $trustStoreBlocks
-            if (-not (Test-ValidPemFile -Path $certPath)) {
-                Write-Host "[Error] Exported PEM file is invalid: $certPath" -ForegroundColor Red
-                exit 1
+            try {
+                Write-TrustStorePemFile -TargetPath $certPath -PemBlocks $trustStoreBlocks
+                if (-not (Test-ValidPemFile -Path $certPath)) {
+                    throw "Exported PEM file is invalid: $certPath"
+                }
+                $certCount = (Get-PemBlocksFromFile -Path $certPath).Count
+                Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoHuggingface:(DoHuggingface) -DoRuby:(DoRuby)
+                Write-Host "   + $(Split-Path -Leaf $userHome): $certCount certs → $certPath (env vars set)"
+                $deployedCount++
+            } catch {
+                Write-Warning "Skipping $userHome : $($_.Exception.Message)"
             }
-            $certCount = (Get-PemBlocksFromFile -Path $certPath).Count
-            Set-OtherUserEnvVars -ProfilePath $userHome -CertPath $certPath -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoHuggingface:(DoHuggingface) -DoRuby:(DoRuby)
-            Write-Host "   + $(Split-Path -Leaf $userHome): $certCount certs → $certPath"
+        }
+        if ($deployedCount -eq 0) {
+            Write-Host "[Error] Could not deploy cert bundle to any user profile." -ForegroundColor Red
+            exit 1
         }
     } else {
         Write-Host "[2/4] Deploying cert bundle and User-level env for current user..."

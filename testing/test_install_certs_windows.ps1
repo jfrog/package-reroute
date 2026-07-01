@@ -153,11 +153,13 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     $Run++
     $extractRel = Join-Path "package-reroute-test" ([Guid]::NewGuid().ToString("N").Substring(0, 8))
     $rExtract = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", $extractRel, "-Package", "npm")
-    if ($rExtract.ExitCode -eq 0 -and (($rExtract.Stdout + $rExtract.Stderr) -match "trust store|certificate")) {
+    $extractOut = $rExtract.Stdout + $rExtract.Stderr
+    if ($rExtract.ExitCode -eq 0 -and ($extractOut -match "trust store|certificate|certs")) {
         Write-Host "  OK ($Run): -ExtractPath exports trust store (exit 0)"
         $script:Pass++
     } else {
         Write-Host "  FAIL ($Run): -ExtractPath expected exit 0 with trust store export, got $($rExtract.ExitCode)"
+        if ($extractOut.Trim().Length -gt 0) { Write-Host "    Output: $extractOut" }
         $script:Fail++
     }
 
