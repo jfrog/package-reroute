@@ -26,6 +26,7 @@ $EnvVarsToRestore = @(
     "NODE_EXTRA_CA_CERTS",
     "NODE_USE_SYSTEM_CA",
     "UV_NATIVE_TLS",
+    "UV_SYSTEM_CERTS",
     "REQUESTS_CA_BUNDLE",
     "SSL_CERT_FILE",
     "HF_HUB_DISABLE_XET",
@@ -117,6 +118,15 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         }
     }
 
+    function Test-SameCertPath {
+        param([string]$A, [string]$B)
+        if ([string]::IsNullOrWhiteSpace($A) -or [string]::IsNullOrWhiteSpace($B)) { return $false }
+        return [string]::Equals(
+            [System.IO.Path]::GetFullPath($A),
+            [System.IO.Path]::GetFullPath($B),
+            [StringComparison]::OrdinalIgnoreCase)
+    }
+
     $Nonexistent = Join-Path $TempDir "nonexistent.pem"
 
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -127,25 +137,31 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
 
     Write-Host "=== install_certs_windows.ps1 CLI tests ==="
 
-    # No cert source (only -Package; no parameter set selected)
+    # No cert source (only -Package)
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
-    Assert-Stderr -Pattern "Parameter set|cannot be resolved|ExtractPath|UseCert" -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
+    Assert-Stderr -Pattern "either -ExtractPath or -UseCert must be provided" -ScriptPath $InstallScript -ScriptArguments @("-Package", "all")
 
     # Invalid -Package
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
     Assert-Stderr -Pattern "ValidateSet|npm|python|huggingface|ruby|all" -ScriptPath $InstallScript -ScriptArguments @("-Package", "foo")
 
-    # -CertName without -ExtractPath (PowerShell requires both in set)
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
-    Assert-Stderr -Pattern "ExtractPath|Missing|argument for parameter|ParameterSet|required" -ScriptPath $InstallScript -ScriptArguments @("-CertName", "X")
+    # -UseCert and -ExtractPath together (mutually exclusive)
+    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-ExtractPath", "C:\temp")
+    Assert-Stderr -Pattern "cannot be used together" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-ExtractPath", "C:\temp")
 
-    # -ExtractPath without -CertName
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
-    Assert-Stderr -Pattern "CertName|Missing|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", "C:\temp")
-
-    # -UseCert and -CertName together
-    Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
-    Assert-Stderr -Pattern "cannot be used together|Parameter set" -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-CertName", "X")
+    # -ExtractPath alone: full trust store export (macOS-style)
+    $Run++
+    $extractRel = Join-Path "package-reroute-test" ([Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $rExtract = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-ExtractPath", $extractRel, "-Package", "npm")
+    $extractOut = $rExtract.Stdout + $rExtract.Stderr
+    if ($rExtract.ExitCode -eq 0 -and ($extractOut -match "trust store|certificate|certs")) {
+        Write-Host "  OK ($Run): -ExtractPath exports trust store (exit 0)"
+        $script:Pass++
+    } else {
+        Write-Host "  FAIL ($Run): -ExtractPath expected exit 0 with trust store export, got $($rExtract.ExitCode)"
+        if ($extractOut.Trim().Length -gt 0) { Write-Host "    Output: $extractOut" }
+        $script:Fail++
+    }
 
     # -UseCert with nonexistent file
     Assert-ExitCode -Expected 1 -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $Nonexistent)
@@ -169,8 +185,9 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
     Write-Host ""
     Write-Host "=== install_certs_windows.ps1 Python TLS vs Hugging Face Hub ==="
 
-    # -UseCert -Package python: TLS vars set to generated bundle; HF_* left unchanged on Machine
+    # -UseCert -Package python: TLS vars point at supplied PEM; HF_* left unchanged on Machine
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+    $savedUvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedSsl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
     $savedHfXet = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
@@ -184,22 +201,24 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $script:Fail++
         } else {
             $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $uvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
             $req = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
             $ssl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
             $hfx = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
             $hfe = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfd = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
             $hfOk = ($hfx -eq $savedHfXet -and $hfe -eq $savedHfEtag -and $hfd -eq $savedHfDl)
-            if ($uv -eq "1" -and $req -and $req -eq $ssl -and $req -ne $CertPath -and (Test-Path -LiteralPath $req -PathType Leaf) -and $hfOk) {
-                Write-Host "  OK ($Run): -Package python sets UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE to generated bundle; HF_HUB_* unchanged"
+            if ($uv -eq "1" -and $uvSys -eq "true" -and $req -and $req -eq $ssl -and (Test-SameCertPath $req $CertPath) -and $hfOk) {
+                Write-Host "  OK ($Run): -Package python sets UV_NATIVE_TLS, UV_SYSTEM_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE to UseCert PEM; HF_HUB_* unchanged"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' (expected '1'), REQUESTS_CA_BUNDLE='$req', SSL_CERT_FILE='$ssl' (expected same generated bundle, not '$CertPath'), HF xet/etag/dl='$hfx'/'$hfe'/'$hfd' (expected saved '$savedHfXet'/'$savedHfEtag'/'$savedHfDl')"
+                Write-Host "  FAIL ($Run): UV_NATIVE_TLS='$uv' UV_SYSTEM_CERTS='$uvSys' REQUESTS_CA_BUNDLE='$req' SSL_CERT_FILE='$ssl' (expected '$CertPath'), HF xet/etag/dl='$hfx'/'$hfe'/'$hfd'"
                 $script:Fail++
             }
         }
     } finally {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
+        [Environment]::SetEnvironmentVariable("UV_SYSTEM_CERTS", $savedUvSys, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
         [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $savedSsl, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $savedHfXet, "Machine")
@@ -207,7 +226,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $savedHfDl, "Machine")
     }
 
-    # -UseCert -Package ruby: Ruby/OpenSSL vars set to generated bundle; Python/HF vars left unchanged on Machine
+    # -UseCert -Package ruby: SSL_CERT_FILE points at supplied PEM; Python/HF vars left unchanged on Machine
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedSsl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
@@ -228,11 +247,11 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $hfe = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfd = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
             $otherOk = ($uv -eq $savedUv -and $req -eq $savedReq -and $hfx -eq $savedHfXet -and $hfe -eq $savedHfEtag -and $hfd -eq $savedHfDl)
-            if ($ssl -and $ssl -ne $CertPath -and (Test-Path -LiteralPath $ssl -PathType Leaf) -and $otherOk) {
-                Write-Host "  OK ($Run): -Package ruby sets SSL_CERT_FILE to generated bundle and leaves Python/HF vars unchanged"
+            if ((Test-SameCertPath $ssl $CertPath) -and $otherOk) {
+                Write-Host "  OK ($Run): -Package ruby sets SSL_CERT_FILE to UseCert PEM and leaves Python/HF vars unchanged"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): SSL_CERT_FILE='$ssl' (expected generated bundle, not '$CertPath'), UV='$uv' REQ='$req' HF='$hfx'/'$hfe'/'$hfd'"
+                Write-Host "  FAIL ($Run): SSL_CERT_FILE='$ssl' (expected '$CertPath'), UV='$uv' REQ='$req' HF='$hfx'/'$hfe'/'$hfd'"
                 $script:Fail++
             }
         }
@@ -245,8 +264,9 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $savedHfDl, "Machine")
     }
 
-    # -UseCert -Package huggingface: Python TLS + HF Hub on Machine
+    # -UseCert -Package huggingface: Python TLS + HF Hub on Machine; all cert vars point at UseCert PEM
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+    $savedUvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedSsl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
     $savedHfXet = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
@@ -260,13 +280,14 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $script:Fail++
         } else {
             $uv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $uvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
             $req = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
             $ssl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
             $hfx = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
             $hfe = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfd = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
-            if ($uv -eq "1" -and $req -and $req -eq $ssl -and $req -ne $CertPath -and (Test-Path -LiteralPath $req -PathType Leaf) -and $hfx -eq "1" -and $hfe -eq "86400" -and $hfd -eq "86400") {
-                Write-Host "  OK ($Run): -Package huggingface sets UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, HF_HUB_*"
+            if ($uv -eq "1" -and $uvSys -eq "true" -and (Test-SameCertPath $req $CertPath) -and (Test-SameCertPath $ssl $CertPath) -and $hfx -eq "1" -and $hfe -eq "86400" -and $hfd -eq "86400") {
+                Write-Host "  OK ($Run): -Package huggingface sets UV_*, REQUESTS_CA_BUNDLE, SSL_CERT_FILE to UseCert PEM, HF_HUB_*"
                 $script:Pass++
             } else {
                 Write-Host "  FAIL ($Run): huggingface package env mismatch"
@@ -275,6 +296,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         }
     } finally {
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
+        [Environment]::SetEnvironmentVariable("UV_SYSTEM_CERTS", $savedUvSys, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
         [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $savedSsl, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $savedHfXet, "Machine")
@@ -282,10 +304,11 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $savedHfDl, "Machine")
     }
 
-    # -UseCert -Package all: verify npm and Python + HF vars
+    # -UseCert -Package all: verify npm, Python TLS, Ruby, and HF vars all point at UseCert PEM
     $savedNode = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
     $savedNodeSys = [Environment]::GetEnvironmentVariable("NODE_USE_SYSTEM_CA", "Machine")
     $savedUv = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+    $savedUvSys = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
     $savedReq = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
     $savedSsl = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
     $savedHfXet = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
@@ -299,6 +322,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $script:Fail++
         } else {
             $uvAll = [Environment]::GetEnvironmentVariable("UV_NATIVE_TLS", "Machine")
+            $uvSysAll = [Environment]::GetEnvironmentVariable("UV_SYSTEM_CERTS", "Machine")
             $reqAll = [Environment]::GetEnvironmentVariable("REQUESTS_CA_BUNDLE", "Machine")
             $sslAll = [Environment]::GetEnvironmentVariable("SSL_CERT_FILE", "Machine")
             $nodeAll = [Environment]::GetEnvironmentVariable("NODE_EXTRA_CA_CERTS", "Machine")
@@ -306,11 +330,11 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
             $hfxAll = [Environment]::GetEnvironmentVariable("HF_HUB_DISABLE_XET", "Machine")
             $hfeAll = [Environment]::GetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", "Machine")
             $hfdAll = [Environment]::GetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", "Machine")
-            if ($nodeSysAll -eq "1" -and $nodeAll -eq $CertPath -and $uvAll -eq "1" -and $reqAll -and $reqAll -eq $sslAll -and $reqAll -ne $CertPath -and (Test-Path -LiteralPath $reqAll -PathType Leaf) -and $hfxAll -eq "1" -and $hfeAll -eq "86400" -and $hfdAll -eq "86400") {
-                Write-Host "  OK ($Run): -Package all sets NODE_*, UV_NATIVE_TLS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, HF_HUB_*"
+            if ($nodeSysAll -eq "1" -and (Test-SameCertPath $nodeAll $CertPath) -and $uvAll -eq "1" -and $uvSysAll -eq "true" -and (Test-SameCertPath $reqAll $CertPath) -and (Test-SameCertPath $sslAll $CertPath) -and $hfxAll -eq "1" -and $hfeAll -eq "86400" -and $hfdAll -eq "86400") {
+                Write-Host "  OK ($Run): -Package all sets NODE_*, UV_*, REQUESTS_CA_BUNDLE, SSL_CERT_FILE to UseCert PEM, HF_HUB_*"
                 $script:Pass++
             } else {
-                Write-Host "  FAIL ($Run): NODE_USE_SYSTEM_CA='$nodeSysAll' NODE_EXTRA_CA_CERTS='$nodeAll' UV_NATIVE_TLS='$uvAll' REQUESTS_CA_BUNDLE='$reqAll' SSL_CERT_FILE='$sslAll' HF='$hfxAll'/'$hfeAll'/'$hfdAll'"
+                Write-Host "  FAIL ($Run): NODE_USE_SYSTEM_CA='$nodeSysAll' NODE_EXTRA_CA_CERTS='$nodeAll' UV_NATIVE_TLS='$uvAll' UV_SYSTEM_CERTS='$uvSysAll' REQUESTS_CA_BUNDLE='$reqAll' SSL_CERT_FILE='$sslAll' HF='$hfxAll'/'$hfeAll'/'$hfdAll'"
                 $script:Fail++
             }
         }
@@ -318,6 +342,7 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $savedNode, "Machine")
         [Environment]::SetEnvironmentVariable("NODE_USE_SYSTEM_CA", $savedNodeSys, "Machine")
         [Environment]::SetEnvironmentVariable("UV_NATIVE_TLS", $savedUv, "Machine")
+        [Environment]::SetEnvironmentVariable("UV_SYSTEM_CERTS", $savedUvSys, "Machine")
         [Environment]::SetEnvironmentVariable("REQUESTS_CA_BUNDLE", $savedReq, "Machine")
         [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $savedSsl, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $savedHfXet, "Machine")
