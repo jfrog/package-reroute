@@ -20,9 +20,9 @@ Environment variables by platform (see each section for details):
 | `NODE_USE_SYSTEM_CA=1` | Node/npm | macOS, Debian, Windows when npm is configured |
 | `NODE_EXTRA_CA_CERTS=<path>` | Node/npm | PEM path (bundle allowed) |
 | `UV_NATIVE_TLS=true` / `1` | Python **uv** | macOS uses `true`; Windows uses `1`; **not** set by the Debian/Ubuntu script |
-| `UV_SYSTEM_CERTS=true` | Python **uv** | Set by macOS for **`python`**, **`huggingface`**, or **`all`** |
+| `UV_SYSTEM_CERTS=true` | Python **uv** | Set by macOS and Windows for **`python`**, **`huggingface`**, or **`all`** |
 | `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
-| `SSL_CERT_FILE=<path>` | OpenSSL-backed tools, including Ruby | Set on **Debian/Ubuntu** for **`python`**, **`huggingface`**, or **`all`** to the system CA bundle; set on **Windows** for **`python`**, **`huggingface`**, **`ruby`**, or **`all`** to a generated bundle |
+| `SSL_CERT_FILE=<path>` | OpenSSL-backed tools, including Ruby | Set on **Debian/Ubuntu** for **`python`**, **`huggingface`**, or **`all`** to the system CA bundle; on **Windows** for **`python`**, **`huggingface`**, **`ruby`**, or **`all`** to the same PEM as other cert vars (`package-route.pem` or `-UseCert` path) |
 | `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
 | `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
 | `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: download timeout (seconds) |
@@ -203,7 +203,7 @@ Tests are black-box (exit codes and stderr).
 
 #### Windows tests
 
-**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation; **-UseCert -Package python** sets Python TLS to a generated bundle and leaves existing `HF_HUB_*` unchanged; **-Package ruby** sets `SSL_CERT_FILE`; **-Package huggingface** adds `HF_HUB_*`; **-Package all** sets npm + TLS + Ruby + HF; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
+**test_install_certs_windows.ps1** runs automated tests for **install_certs_windows.ps1** (CLI and parameter validation; **-ExtractPath** full trust-store export; **-UseCert -Package python** sets TLS Machine vars to the supplied PEM and leaves existing `HF_HUB_*` unchanged; **-Package ruby** sets `SSL_CERT_FILE`; **-Package huggingface** adds `HF_HUB_*`; **-Package all** sets npm + TLS + Ruby + HF; when run as admin) and **validate_install_windows.ps1** (-ExpectedSubject required, env-based validation: valid PEM, missing file, invalid PEM, subject match and no-match, and system-level env when run as admin). **Run the test script as Administrator** so install script tests and system-level validate tests execute; the script uses a temp directory and an embedded PEM.
 
 **Requirements:** Windows with PowerShell. The install and validate scripts must be in the parent of `testing/` (repo root).
 
@@ -218,7 +218,7 @@ Exit code 0 if all tests pass, 1 otherwise. Output shows pass/fail per test and 
 
 | Area | Covered |
 |------|--------|
-| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source (parameter set error); invalid `-Package`; `-CertName` without `-ExtractPath` (and reverse); `-UseCert` and `-CertName` together; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Packages:** `-UseCert -Package python` sets TLS-only Machine vars to a generated bundle and does not remove pre-existing `HF_HUB_*`; `-Package ruby` sets `SSL_CERT_FILE` to the generated bundle; `-Package huggingface` adds `HF_HUB_*`; `-Package all` sets npm + TLS + Ruby + HF. |
+| **install_certs_windows.ps1** | When run as admin: script passes admin check (no "must run as Administrator" error). No cert source; invalid `-Package`; `-UseCert` and `-ExtractPath` together; `-ExtractPath` full trust-store export; `-UseCert` with nonexistent file; `-UseCert` with invalid PEM; `-UseCert` with valid PEM (no "not a file" or "Invalid PEM" error). **Packages:** `-UseCert -Package python` sets TLS-only Machine vars to the supplied PEM and does not remove pre-existing `HF_HUB_*`; `-Package ruby` sets `SSL_CERT_FILE` to the supplied PEM; `-Package huggingface` adds `HF_HUB_*`; `-Package all` sets npm + TLS + Ruby + HF, all pointing at the supplied PEM. |
 | **validate_install_windows.ps1** | `-ExpectedSubject` required (exit 1 if missing); current user env (no paths → exit 0); env path to valid PEM (exit 0), missing file (exit 1), invalid PEM (exit 1); subject mismatch (exit 1, FAIL message); system-level (Machine) env when run as admin. Reads `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, and `SSL_CERT_FILE`. |
 
 Tests are black-box (exit codes and stdout/stderr). Paths are passed to the validate script via a temp file when invoking as a child process to avoid command-line parsing issues with backslashes.
@@ -353,20 +353,29 @@ sudo ./validate_certs_debian_ubuntu.sh --all-users --expected-subject "O=Example
 
 ### Overview
 
-`install_certs_windows.ps1` configures **Node/npm**, **Python**, and/or **Ruby** on Windows to use a custom CA certificate. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
+`install_certs_windows.ps1` configures **Node/npm**, **Python**, and/or **Ruby** on Windows to use trusted CAs for redirect-proxy / corporate TLS flows. **It must be run as Administrator (or SYSTEM);** the script exits with an error otherwise.
 
-- Either **extracts** a certificate from the Windows cert store (LocalMachine\Root) by **subject substring** (`-CertName`), or **uses an existing** PEM file you provide (**-UseCert**). If **multiple** certs match the pattern, the script logs a warning and picks one (prefers a subject containing `Root`, otherwise the first match).
-- With **-CertName** and **-ExtractPath:** writes **package-route.pem** per user under each user’s profile and sets **User**-level env vars in the registry for each user. When Python or Ruby is configured, this file is a combined bundle: the selected cert first, then Windows trusted roots, then valid certs from previously configured bundles (dedupe by SHA-256 fingerprint). **npm:** `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS`. **Python TLS** (`python`, `huggingface`, or `all`): `UV_NATIVE_TLS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`. **Ruby** (`ruby` or `all`): `SSL_CERT_FILE`. **Hugging Face Hub** (`huggingface` or `all`): `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT`.
-- With **-UseCert:** keeps npm pointed at your PEM, and writes a generated combined bundle under `C:\ProgramData\package-reroute\package-route-bundle.pem` for Python/Ruby OpenSSL-style clients. The script sets **Machine**-level env vars and **deletes** overlapping **User**-level vars so they do not override Machine (User wins over Machine on Windows). Which vars are set or cleared depends on `-Package` (see env table above).
-- Clears Docker Hub credentials for the current PowerShell user. When running as `SYSTEM`, this cleanup is skipped with a warning because it must run in the user's Windows session.
+Behavior matches **install_certs_macos.sh** (full trust-store PEM export, or use an existing PEM):
 
-Re-runs **merge** certs: generated bundles put the custom cert first, append Windows roots, then append valid certs from previous bundles (dedupe by SHA-256 fingerprint). So running with a second cert can preserve existing custom certs instead of replacing them.
+- With **-ExtractPath:** exports **all certificates** from Windows trust stores into **package-route.pem** per user under each profile (`~/<ExtractPath>/package-route.pem`). Stores exported: **Trusted Root** (`LocalMachine\Root`, `CurrentUser\Root`), **Third-Party Root** (`LocalMachine\AuthRoot`), and **Intermediate** (`LocalMachine\CA`, `CurrentUser\CA`). Includes enterprise roots/intermediates (e.g. NetSkope) plus public CAs. Sets **User**-level env vars in the registry for each user. Does **not** modify System (Machine) cert env vars.
+- With **-UseCert:** points all cert env vars at your existing PEM file (no store export, no separate bundle). Sets **Machine**-level env vars when run as admin and **removes** overlapping **User**-level cert vars so Machine settings apply (User wins over Machine on Windows).
+
+**Env vars set (same PEM path for all packages in each mode):**
+
+| Package | Variables |
+|---------|-----------|
+| **npm** | `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS` |
+| **python** / **huggingface** / **all** | `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` |
+| **ruby** / **all** | `SSL_CERT_FILE` |
+| **huggingface** / **all** | `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT` |
+
+Clears Docker Hub credentials for the current PowerShell user. When running as `SYSTEM`, this cleanup is skipped with a warning because it must run in the user's Windows session.
 
 ### Requirements
 
 - **Windows** with PowerShell.
 - **Run as Administrator** (or SYSTEM). The script checks and exits with an error if not elevated.
-- When using **-CertName:** at least one certificate in LocalMachine\Root must match; if several match, the script warns and selects one (see Overview).
+- When using **-ExtractPath:** at least one certificate must exist in the exported trust stores.
 - Optional: **Docker Desktop / Docker CLI** for Docker Hub credential-store cleanup. If Docker CLI is missing, the cleanup step is skipped.
 
 ### How to use
@@ -374,7 +383,7 @@ Re-runs **merge** certs: generated bundles put the custom cert first, append Win
 Run from a directory that contains the script (or use full path):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
+powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -ExtractPath certs\jfrog
 # Or use an existing PEM:
 powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 ```
@@ -382,21 +391,20 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `-Package` | No (default: **all**) | `npm`, `python`, `huggingface`, `ruby`, or `all` (all = npm + Python TLS + Ruby + Hugging Face Hub). |
-| `-CertName` | Yes* | Substring used to match cert **Subject** in the store (`*CertName*` wildcard). Requires `-ExtractPath`. Cannot be used with `-UseCert`. |
-| `-ExtractPath` | Yes* | Directory under each user’s profile for **package-route.pem** (rooted paths are normalized to a folder under the profile, same idea as macOS). Requires `-CertName`. |
-| `-UseCert` | Yes* | Path to an existing PEM file. Cannot be used with `-CertName` / `-ExtractPath`. |
+| `-ExtractPath` | Yes* | Directory under each user's profile for **package-route.pem** (rooted paths are normalized to a folder under the profile, same idea as macOS). Full trust-store export. Cannot be used with `-UseCert`. |
+| `-UseCert` | Yes* | Path to an existing PEM file. Cannot be used with `-ExtractPath`. |
 
-\* Use **either** (`-CertName` and `-ExtractPath`) **or** `-UseCert`.
+\* Use **either** `-ExtractPath` **or** `-UseCert` (exactly one).
 
 ### Examples
 
-**Extract from store and configure all users (run as admin):**
+**Extract trust store and configure all users (run as admin):**
 
 ```powershell
-.\install_certs_windows.ps1 -Package all -CertName "Your Org Root CA" -ExtractPath certs\npm
+.\install_certs_windows.ps1 -Package all -ExtractPath certs\jfrog
 ```
 
-**Use an existing PEM (Machine-level env; Python/Ruby use a generated combined bundle; User-level cert vars are deleted):**
+**Use an existing PEM (Machine-level env; User-level cert vars are removed):**
 
 ```powershell
 .\install_certs_windows.ps1 -Package all -UseCert C:\Users\Administrator\other-ca\company-ca.pem
@@ -405,18 +413,20 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 **Only npm:**
 
 ```powershell
-.\install_certs_windows.ps1 -Package npm -CertName "Amazon Root CA 1" -ExtractPath certs\npm
+.\install_certs_windows.ps1 -Package npm -ExtractPath certs\jfrog
 ```
 
 ### Summary (Windows)
 
 - **Admin required.** The script must be run as Administrator (or SYSTEM).
-- **Cert source:** either store (`-CertName` + `-ExtractPath`) or file (`-UseCert`).
-- **Extract path:** per-user **package-route.pem** and User-level env per `-Package` (npm / Python TLS / Ruby / Hugging Face as above); when Python or Ruby is selected, the file is a combined bundle of the custom cert plus Windows roots. Machine-level cert vars are **cleared** so only User applies (avoids duplication if you previously used -UseCert).
-- **UseCert:** npm points at the supplied PEM; Python/Ruby point at the generated combined bundle under `C:\ProgramData\package-reroute\package-route-bundle.pem`; Machine-level env is set per `-Package`; **`python`** does not set `HF_HUB_*` and does **not** clear pre-existing `HF_HUB_*` on the target scope. User-level cert vars are **deleted** so only Machine applies when using `-UseCert` as admin.
+- **Cert source:** either full store export (`-ExtractPath`) or file (`-UseCert`).
+- **Extract path:** per-user **package-route.pem** (multi-cert bundle) and **User**-level env per `-Package`. System (Machine) cert env vars are **not** set or cleared.
+- **UseCert:** all cert env vars point at the supplied PEM; **Machine**-level env when run as admin; **`python`** does not set `HF_HUB_*` and does **not** clear pre-existing `HF_HUB_*` on the target scope. User-level cert vars are **removed** so Machine applies.
 - **Docker:** clears Docker Hub credentials for the current PowerShell user. Run the script in the user's session for this step; `SYSTEM` cannot clean up the user's Docker credential store.
 
 Users must start a **new terminal** for env changes to take effect.
+
+After install, verify with **validate_install_windows.ps1 -ExpectedSubject** (see below) to confirm your enterprise CA subject appears in the bundle.
 
 ---
 
