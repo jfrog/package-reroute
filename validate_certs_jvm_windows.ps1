@@ -16,7 +16,7 @@
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
 #   validate_certs_jvm_linux.sh      - system anchor OR JKS+JTO check
-#   validate_certs_jvm_macos.sh      - LaunchAgent + launchctl getenv check
+#   validate_certs_jvm_macos.sh      - ~/.zshrc JAVA_TOOL_OPTIONS check
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/

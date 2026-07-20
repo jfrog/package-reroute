@@ -31,7 +31,7 @@
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
 #   install_certs_jvm_linux.sh       - bundled JKS + JAVA_TOOL_OPTIONS
 #   install_certs_jvm_rhel.sh        - RHEL update-ca-trust
-#   install_certs_jvm_macos.sh       - LaunchAgent + per-user JKS
+#   install_certs_jvm_macos.sh       - ~/.zshrc + per-user JKS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/

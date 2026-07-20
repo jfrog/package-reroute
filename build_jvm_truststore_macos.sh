@@ -168,7 +168,9 @@ build_truststore() {
     local tmpdir cert fp imported_count=0 tmp_store seen system_bundle
 
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    # Expand path now — under set -u a deferred "$tmpdir" fails once this
+    # local goes out of scope when build_truststore returns.
+    trap 'rm -rf "'"$tmpdir"'"' EXIT
     mkdir -p "$tmpdir/system"
     seen="$tmpdir/seen-fingerprints.txt"
     : > "$seen"

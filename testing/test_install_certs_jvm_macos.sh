@@ -8,22 +8,19 @@
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
 # fresh-state cases and via `trap EXIT`. The test runner builds a bundled
 # truststore fixture from macOS system certificates plus a lab CA, then verifies
-# the installer only copies that ready-made JKS into place and configures launchd.
+# the installer only copies that ready-made JKS into place and configures ~/.zshrc.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
-#   3. Idempotent re-install (copied JKS checksum stable; plist replaced)
+#   3. Idempotent re-install (copied JKS checksum stable; .zshrc export replaced)
 #   4. Missing --use-truststore is rejected
 #   5. Missing / empty truststore paths are rejected
-#   6. After bootstrap, launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> returns
-#      the JKS path (skip on CI runners with no GUI session)
-#   7. Plist content is well-formed XML and points at the expected JKS path
-#      (covers the install path even when launchctl can't be verified)
-#   8. --all-users iterates /Users/* and installs into every eligible account
+#   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS
+#   7. --all-users iterates /Users/* and installs into every eligible account
 #      (covers the iter_all_users filter + per-user chown contract)
-#   9. Installed JKS preserves public roots from the bundled truststore
-#  10. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer
+#   8. Installed JKS preserves public roots from the bundled truststore
+#   9. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer
 
 set -euo pipefail
 fail_msg() { echo "BUG: $1" >&2; exit 1; }
@@ -54,24 +51,68 @@ TEST_UID="$(id -u "$TEST_USER")"
 
 JKS="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm/truststore.jks"
 JKS_DIR="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm"
-PLIST="${TEST_HOME}/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist"
-LABEL="com.jfrog.package-reroute.jto-env"
+ZSHRC="${TEST_HOME}/.zshrc"
 BUNDLE_JKS="/tmp/jvm-mac-bundled-truststore.jks"
+ZSHRC_BACKUP=""
 
 echo "Test user: $TEST_USER (uid=$TEST_UID, home=$TEST_HOME)"
 
+# Preserve the developer's real .zshrc across the smoke run, then strip only
+# the JAVA_TOOL_OPTIONS line we may have written during tests.
+backup_zshrc() {
+    if [[ -f "$ZSHRC" && -z "$ZSHRC_BACKUP" ]]; then
+        ZSHRC_BACKUP="$(mktemp /tmp/jvm-mac-zshrc-backup.XXXXXX)"
+        cp "$ZSHRC" "$ZSHRC_BACKUP"
+    fi
+}
+
+restore_zshrc() {
+    if [[ -n "$ZSHRC_BACKUP" && -f "$ZSHRC_BACKUP" ]]; then
+        cp "$ZSHRC_BACKUP" "$ZSHRC"
+        chown "$TEST_USER" "$ZSHRC" 2>/dev/null || true
+        rm -f "$ZSHRC_BACKUP"
+        ZSHRC_BACKUP=""
+    elif [[ -f "$ZSHRC" ]]; then
+        # No prior .zshrc existed; remove any JAVA_TOOL_OPTIONS we added, or
+        # the empty file we created.
+        if grep -qE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" 2>/dev/null; then
+            local tmp
+            tmp="$(mktemp)"
+            grep -vE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" > "$tmp" || true
+            if [[ -s "$tmp" ]]; then
+                cat "$tmp" > "$ZSHRC"
+            else
+                rm -f "$ZSHRC"
+            fi
+            rm -f "$tmp"
+            [[ -f "$ZSHRC" ]] && chown "$TEST_USER" "$ZSHRC" 2>/dev/null || true
+        fi
+    fi
+}
+
+strip_jto_from_zshrc() {
+    if [[ -f "$ZSHRC" ]] && grep -qE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" 2>/dev/null; then
+        local tmp
+        tmp="$(mktemp)"
+        grep -vE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" > "$tmp" || true
+        cat "$tmp" > "$ZSHRC"
+        rm -f "$tmp"
+        chown "$TEST_USER" "$ZSHRC" 2>/dev/null || true
+    fi
+}
+
 cleanup() {
-    launchctl bootout "gui/${TEST_UID}/${LABEL}" 2>/dev/null || true
-    rm -f "$PLIST"
     rm -rf "$JKS_DIR"
-    launchctl asuser "${TEST_UID}" launchctl unsetenv JAVA_TOOL_OPTIONS 2>/dev/null || true
+    strip_jto_from_zshrc
     rm -f /tmp/jvm-mac-empty-truststore.jks
 }
 
 final_cleanup() {
     cleanup
+    restore_zshrc
     rm -f "$BUNDLE_JKS"
 }
+backup_zshrc
 trap final_cleanup EXIT
 
 # Pick an OpenSSL implementation that supports `-addext` reliably.
@@ -151,6 +192,20 @@ dump_last_log() {
     unset _LAST_LOG
 }
 
+get_zshrc_jto() {
+    local line
+    [[ -f "$ZSHRC" ]] || return 1
+    line="$(grep -E '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" | head -1 || true)"
+    [[ -n "$line" ]] || return 1
+    line="${line#export JAVA_TOOL_OPTIONS=}"
+    if [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
+    fi
+    line="${line//\\\"/\"}"
+    line="${line//\\\\/\\}"
+    printf '%s' "$line"
+}
+
 #-----------------------------------------------------------------------------
 echo
 echo "=== 1. positive: install + validate ==="
@@ -171,7 +226,7 @@ echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 3. idempotency: 2nd install preserves bundled JKS / single plist ==="
+echo "=== 3. idempotency: 2nd install preserves bundled JKS / single .zshrc export ==="
 install_as_test_user --use-truststore "$BUNDLE_JKS"
 validate_as_test_user --expected-subject "Lab JVM mac CA Test"
 
@@ -186,7 +241,8 @@ corp_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
 corp_count=${corp_count:-0}
 [[ "$corp_count" -eq 1 ]] || fail_msg "expected exactly 1 corporate-CA alias after 2 installs, got $corp_count"
 [[ "$alias_count" -ge 100 ]] || fail_msg "expected JKS to include macOS system roots (>=100 aliases), got $alias_count"
-[[ -f "$PLIST" ]] || fail_msg "plist missing after 2nd install"
+jto_count=$(grep -cE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" || true)
+[[ "$jto_count" -eq 1 ]] || fail_msg "expected exactly 1 JAVA_TOOL_OPTIONS export in .zshrc, got $jto_count"
 echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
 #-----------------------------------------------------------------------------
@@ -219,53 +275,18 @@ echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 7. launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> ==="
+echo "=== 7. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the JKS ==="
 cleanup
 install_as_test_user --use-truststore "$BUNDLE_JKS"
-if launchctl print "gui/${TEST_UID}" >/dev/null 2>&1; then
-    # Mirror the installer's 20x100ms retry: bootstrap returns the moment
-    # the agent is loaded, but the launchctl-setenv ProgramArguments runs
-    # asynchronously. Without a retry the assertion would flake on GUI
-    # runners under load.
-    jto=""
-    # 20 retries × 100ms = ~2s total — mirrors installer's bootstrap_launch_agent
-    # to cover the async-setenv window even under EDR load.
-    # shellcheck disable=SC2034
-    for _i in $(seq 1 20); do
-        jto="$(launchctl asuser "${TEST_UID}" launchctl getenv JAVA_TOOL_OPTIONS 2>/dev/null || true)"
-        [[ -n "$jto" ]] && break
-        sleep 0.1
-    done
-    # Accept both quoted and unquoted forms. The post-fix installer writes
-    # the quoted form so JVM tokenization handles the "Application Support"
-    # space; older installs left it unquoted.
-    case "$jto" in
-        *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) echo "  ok" ;;
-        *) fail_msg "launchctl getenv mismatch (got: $jto)" ;;
-    esac
-else
-    echo "  SKIP: gui/${TEST_UID} not active (CI runner with no GUI session is fine — plist will load at login)"
-fi
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 8. plist is well-formed XML and points at the expected JKS ==="
-# Reuses the install from step 7 (no cleanup). Independent of whether
-# launchctl bootstrap succeeded — validates the write_launch_agent_plist
-# code path even on headless CI runners.
-plutil -lint "$PLIST" >/dev/null
-# Confirm the JTO value inside the plist actually references the expected
-# JKS path. plutil -extract pulls the 4th element of ProgramArguments
-# (index 3) which is the `-Djavax.net.ssl.trustStore=… …` arg string.
-jto_in_plist="$(plutil -extract ProgramArguments.3 raw "$PLIST" 2>/dev/null)"
-case "$jto_in_plist" in
+jto="$(get_zshrc_jto)" || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
+case "$jto" in
     *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) echo "  ok" ;;
-    *) fail_msg "plist JTO arg doesn't point at $JKS (got: $jto_in_plist)" ;;
+    *) fail_msg ".zshrc JAVA_TOOL_OPTIONS mismatch (got: $jto)" ;;
 esac
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 9. --all-users iterates eligible accounts ==="
+echo "=== 8. --all-users iterates eligible accounts ==="
 cleanup
 # CI runners only have a single user (`runner`, uid 501). That's enough to
 # verify iter_all_users does at least one iteration through the filter +
@@ -277,9 +298,9 @@ echo "$out" | grep -q "=== User: ${TEST_USER}" \
 echo "$out" | grep -qE "Installed for [0-9]+ user\(s\)" \
     || { echo "$out" | tail -20; fail_msg "--all-users summary line missing"; }
 # Per-user files should be owned by the target user (not root).
-plist_owner="$(stat -f '%Su' "$PLIST")"
-[[ "$plist_owner" == "$TEST_USER" ]] \
-    || fail_msg "plist owner=$plist_owner, expected $TEST_USER (chown failed silently?)"
+zshrc_owner="$(stat -f '%Su' "$ZSHRC")"
+[[ "$zshrc_owner" == "$TEST_USER" ]] \
+    || fail_msg ".zshrc owner=$zshrc_owner, expected $TEST_USER (chown failed silently?)"
 echo "  ok"
 
 #-----------------------------------------------------------------------------
@@ -288,7 +309,7 @@ cleanup
 SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-truststore "$BUNDLE_JKS" >/dev/null
 
 echo
-echo "=== 10. JKS extends bundled public roots ==="
+echo "=== 9. JKS extends bundled public roots ==="
 # Regression guard for the "trustStore replaces, not extends" footgun.
 # -Djavax.net.ssl.trustStore in OpenJDK swaps the JVM's trust source; a JKS
 # holding only the corporate CA would break every public-CA TLS handshake
@@ -301,7 +322,7 @@ alias_count="${alias_count:-0}"
 echo "  ok ($alias_count aliases)"
 
 echo
-echo "=== 11. JKS contains a well-known public root (DigiCert family) ==="
+echo "=== 10. JKS contains a well-known public root (DigiCert family) ==="
 # Spot-check the merge actually happened. DigiCert root certs ship in every
 # macOS system trust bundle under several names; case-insensitive substring
 # match catches the family.
@@ -311,23 +332,19 @@ keytool -list -v -keystore "$JKS" -storepass changeit 2>/dev/null \
 echo "  ok"
 
 echo
-echo "=== 12. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
+echo "=== 11. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
 # Direct repro of the "Application Support" space-tokenisation bug. Spawn a
-# child java -version with the LaunchAgent's env var and assert the JVM
-# does NOT print "Unrecognized option" — that's what an unquoted trustStore
-# path produced before the fix.
-jto_seen="$(launchctl asuser "$TEST_UID" launchctl getenv JAVA_TOOL_OPTIONS 2>/dev/null || true)"
-if [[ -z "$jto_seen" ]]; then
-    echo "  SKIP: gui/$TEST_UID is not active (no logged-in GUI session) — cannot exercise the tokenizer round-trip"
-else
-    java_out="$(JAVA_TOOL_OPTIONS="$jto_seen" java -version 2>&1 || true)"
-    if grep -q 'Unrecognized option' <<<"$java_out"; then
-        printf '%s\n' "$java_out" | head -10
-        echo "JTO seen: $jto_seen"
-        fail_msg "java -version reported 'Unrecognized option' — JAVA_TOOL_OPTIONS tokenization is broken (likely missing inner quotes around the JKS path)"
-    fi
-    echo "  ok (java -version accepted JTO=$jto_seen)"
+# child java -version with the .zshrc export value and assert the JVM does
+# NOT print "Unrecognized option" — that's what an unquoted trustStore path
+# produced before the quoting fix.
+jto_seen="$(get_zshrc_jto)" || fail_msg ".zshrc missing JAVA_TOOL_OPTIONS for tokenizer check"
+java_out="$(JAVA_TOOL_OPTIONS="$jto_seen" java -version 2>&1 || true)"
+if grep -q 'Unrecognized option' <<<"$java_out"; then
+    printf '%s\n' "$java_out" | head -10
+    echo "JTO seen: $jto_seen"
+    fail_msg "java -version reported 'Unrecognized option' — JAVA_TOOL_OPTIONS tokenization is broken (likely missing inner quotes around the JKS path)"
 fi
+echo "  ok (java -version accepted JTO=$jto_seen)"
 
 echo
 echo "================================================================="

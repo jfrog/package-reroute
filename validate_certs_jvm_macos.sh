@@ -5,10 +5,7 @@
 # Asserts, per user:
 #   1. JKS file exists at ~/Library/Application Support/JFrog/package-route-jvm/truststore.jks
 #   2. JKS contains a cert whose subject matches --expected-subject
-#   3. LaunchAgent plist exists at ~/Library/LaunchAgents/com.jfrog.package-reroute.jto-env.plist
-#   4. launchctl getenv JAVA_TOOL_OPTIONS in gui/<uid> returns the JKS path
-#      (only verifiable when the user is in an active GUI session; warn-not-fail
-#      otherwise — the plist still loads on next login).
+#   3. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at that JKS path
 #
 # Run:
 #   bash validate_certs_jvm_macos.sh --expected-subject "O=Zscaler"
@@ -29,9 +26,6 @@ set -euo pipefail
 # script during onboarding, so avoid requiring sibling files for constants.
 JKS_RELATIVE_DIR="Library/Application Support/JFrog/package-route-jvm"
 JKS_BASENAME="truststore.jks"
-LAUNCH_AGENT_RELATIVE_DIR="Library/LaunchAgents"
-LAUNCH_AGENT_LABEL="com.jfrog.package-reroute.jto-env"
-LAUNCH_AGENT_BASENAME="${LAUNCH_AGENT_LABEL}.plist"
 JKS_PASSWORD="changeit"
 
 ALL_USERS=0
@@ -47,12 +41,10 @@ Options:
   --all-users                      Iterate /Users/* (UID >= 501). Requires root.
   --cert-name <name>               Accepted for cross-platform CLI parity with the Linux validator.
                                    Ignored here: macOS matches by subject substring, and the JKS path /
-                                   LaunchAgent label are fixed per-user regardless of cert-name.
+                                   .zshrc export are fixed per-user regardless of cert-name.
   -h, --help                       Show this help
 
-Exits 0 if all checks pass, 1 if any check fails. Result line is qualified
-with a count of any non-fatal warnings (e.g. gui/<uid> domain absent on
-headless / non-active accounts).
+Exits 0 if all checks pass, 1 if any check fails.
 EOF
 }
 
@@ -94,7 +86,7 @@ parse_args() {
     fi
 
     if [[ "$ALL_USERS" -eq 1 && "$(id -u)" -ne 0 ]]; then
-        echo "Error: --all-users requires root (other users' ~/Library is 0700)." >&2
+        echo "Error: --all-users requires root (other users' homes are typically 0700)." >&2
         echo "Use: sudo $0 --all-users --expected-subject ..." >&2
         exit 1
     fi
@@ -110,12 +102,10 @@ check_os() {
 }
 
 FAIL=0
-WARN=0
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 ok()   { echo "  OK:   $1"; }
-warn() { echo "  WARN: $1"; WARN=$((WARN + 1)); }
 
-# When iterating --all-users, reads of /Users/<other>/Library need root.
+# When iterating --all-users, reads of /Users/<other> need root.
 # Wrap file tests so the same call works in both single-user and --all-users mode.
 file_exists() {
     local path="$1"
@@ -123,6 +113,15 @@ file_exists() {
         return 0
     fi
     [[ "$ALL_USERS" -eq 1 ]] && sudo test -f "$path"
+}
+
+read_file() {
+    local path="$1"
+    if [[ "$ALL_USERS" -eq 1 ]]; then
+        sudo cat "$path"
+    else
+        cat "$path"
+    fi
 }
 
 get_user_home() {
@@ -198,58 +197,49 @@ validate_keystore_contains_subject() {
     return 0
 }
 
-validate_launch_agent_plist() {
-    local plist_path="$1" label="$2"
-    if file_exists "$plist_path"; then
-        if command -v plutil >/dev/null 2>&1; then
-            if [[ "$ALL_USERS" -eq 1 ]]; then
-                if sudo plutil -lint "$plist_path" >/dev/null 2>&1; then
-                    ok "$label plist exists and is well-formed: $plist_path"
-                    return 0
-                fi
-            else
-                if plutil -lint "$plist_path" >/dev/null 2>&1; then
-                    ok "$label plist exists and is well-formed: $plist_path"
-                    return 0
-                fi
-            fi
-            fail "$label plist exists but plutil -lint reports it as malformed: $plist_path"
-            return 1
-        fi
-        ok "$label plist exists: $plist_path"
-        return 0
+# Extract the unquoted value from `export VAR="…"`. Handles both double-quoted
+# and bare forms written by ensure_export_in_file.
+get_export_value() {
+    local file="$1" var="$2"
+    local line
+    if ! file_exists "$file"; then
+        return 1
     fi
-    fail "$label LaunchAgent plist not found: $plist_path"
-    return 1
+    line="$(read_file "$file" | grep -E "^export ${var}=" | head -1 || true)"
+    [[ -n "$line" ]] || return 1
+    line="${line#export ${var}=}"
+    # Strip one layer of surrounding quotes if present.
+    if [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
+    fi
+    # Unescape \" and \\ that ensure_export_in_file wrote.
+    line="${line//\\\"/\"}"
+    line="${line//\\\\/\\}"
+    printf '%s' "$line"
 }
 
-validate_launchctl_getenv() {
-    local target_uid="$1" jks_path="$2" label="$3"
-    local domain="gui/${target_uid}"
-
-    if ! launchctl print "$domain" >/dev/null 2>&1; then
-        warn "$label is not in an active GUI session (no $domain); plist will activate at next login."
-        return 0
-    fi
-
+validate_zshrc_jto() {
+    local zshrc="$1" jks_path="$2" label="$3"
     local seen
-    seen="$(launchctl asuser "$target_uid" launchctl getenv JAVA_TOOL_OPTIONS 2>/dev/null || true)"
-    if [[ -z "$seen" ]]; then
-        fail "$label: $domain is active but launchctl getenv JAVA_TOOL_OPTIONS is empty."
+
+    if ! file_exists "$zshrc"; then
+        fail "$label .zshrc not found: $zshrc"
         return 1
     fi
 
-    # Accept both quoted and unquoted forms. The installer writes the quoted
-    # form so the JVM tokenizer respects the space in "Application Support";
-    # older installs (pre-bug-fix) wrote the unquoted form and we still want
-    # the validator to recognise their JKS pointer as valid for diagnosis.
+    if ! seen="$(get_export_value "$zshrc" "JAVA_TOOL_OPTIONS")"; then
+        fail "$label: $zshrc has no export JAVA_TOOL_OPTIONS="
+        return 1
+    fi
+
+    # Accept both quoted and unquoted trustStore= forms.
     case "$seen" in
         *"trustStore=\"${jks_path}\""*|*"trustStore=${jks_path} "*|*"trustStore=${jks_path}")
-            ok "$label: $domain launchctl getenv JAVA_TOOL_OPTIONS points at $jks_path"
+            ok "$label: $zshrc JAVA_TOOL_OPTIONS points at $jks_path"
             return 0
             ;;
         *)
-            fail "$label: $domain launchctl getenv JAVA_TOOL_OPTIONS does not point at $jks_path (got: $seen)"
+            fail "$label: $zshrc JAVA_TOOL_OPTIONS does not point at $jks_path (got: $seen)"
             return 1
             ;;
     esac
@@ -260,12 +250,11 @@ validate_for_user() {
     local uid
     uid="$(id -u "$user")"
     local jks="${home}/${JKS_RELATIVE_DIR}/${JKS_BASENAME}"
-    local plist="${home}/${LAUNCH_AGENT_RELATIVE_DIR}/${LAUNCH_AGENT_BASENAME}"
+    local zshrc="${home}/.zshrc"
 
     echo "Checking user $user (uid=$uid)..."
     validate_keystore_contains_subject "$jks" "$JKS_PASSWORD" "$user truststore" || true
-    validate_launch_agent_plist        "$plist" "$user"                          || true
-    validate_launchctl_getenv          "$uid" "$jks" "$user"                     || true
+    validate_zshrc_jto "$zshrc" "$jks" "$user" || true
 }
 
 main() {
@@ -308,18 +297,10 @@ main() {
 
     echo "---------------------------------------------------"
     if [[ "$FAIL" -eq 0 ]]; then
-        if [[ "$WARN" -eq 0 ]]; then
-            echo "Result: All checks passed."
-        else
-            # Qualify so a green exit doesn't over-promise. The common case
-            # is "gui/<uid> domain absent" (validator can't verify launchctl
-            # getenv without an active GUI session — plist will activate at
-            # next login).
-            echo "Result: All checks passed (with $WARN warning(s) — see above)."
-        fi
+        echo "Result: All checks passed."
         exit 0
     else
-        echo "Result: $FAIL check(s) failed (and $WARN warning(s))."
+        echo "Result: $FAIL check(s) failed."
         exit 1
     fi
 }
