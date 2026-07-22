@@ -23,7 +23,7 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
 | **install_certs_jvm_macos.sh** | macOS (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS + per-user `~/.zshrc` `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (JKS subject + `~/.zshrc` export) |
-| **build_jvm_truststore_macos.sh** | macOS (JVM) | Build installer-ready JKS from macOS system roots plus a supplied PEM CA |
+| **build_jvm_truststore_macos.sh** | macOS (JVM) | Build installer-ready JKS from macOS system keychains |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
 | **build_jvm_truststore_linux.sh** | Linux (JVM) | Build installer-ready JKS from Linux system CA bundle plus a supplied PEM CA |
@@ -391,12 +391,10 @@ sudo ./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
 
 ### Building the bundled truststore
 
-`build_jvm_truststore_macos.sh` creates the `--use-truststore` input for the installer. It exports macOS system certificates from the system keychains, imports them into a JKS truststore, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+`build_jvm_truststore_macos.sh` creates the `--use-truststore` input for the installer. It exports macOS system certificates from SystemRootCertificates + System keychains into a JKS. Enterprise CAs already present there (e.g. Zscaler via ZCC) are included automatically.
 
 ```bash
-./build_jvm_truststore_macos.sh \
-  --use-cert /tmp/ZscalerRoot0.pem \
-  --output /tmp/package-route-truststore.jks
+./build_jvm_truststore_macos.sh --output /tmp/package-route-truststore.jks
 
 sudo ./install_certs_jvm_macos.sh --use-truststore /tmp/package-route-truststore.jks
 ```

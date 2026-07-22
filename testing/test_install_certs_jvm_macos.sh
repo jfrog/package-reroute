@@ -6,9 +6,10 @@
 #   sudo ./testing/test_install_certs_jvm_macos.sh
 #
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
-# fresh-state cases and via `trap EXIT`. The test runner builds a bundled
-# truststore fixture from macOS system certificates plus a lab CA, then verifies
-# the installer only copies that ready-made JKS into place and configures ~/.zshrc.
+# fresh-state cases and via `trap EXIT`. The test runner builds a keychain-only
+# JKS via build_jvm_truststore_macos.sh, then imports a lab CA into that fixture
+# so --expected-subject stays deterministic. The installer only copies the JKS
+# and configures ~/.zshrc.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
@@ -136,9 +137,15 @@ require_keytool() {
 build_bundle_truststore() {
     local ca_path="$1"
     rm -f "$BUNDLE_JKS"
+    # Builder is keychain-only; inject the lab CA into the fixture so
+    # --expected-subject stays deterministic on CI (no ZCC / enterprise CA).
     OPENSSL="$OPENSSL" ./build_jvm_truststore_macos.sh \
-        --use-cert "$ca_path" \
         --output "$BUNDLE_JKS" >/dev/null
+    keytool -importcert -noprompt -storetype JKS \
+        -alias "lab-jvm-mac-ca-test" \
+        -file "$ca_path" \
+        -keystore "$BUNDLE_JKS" \
+        -storepass changeit >/dev/null
     echo "Bundled truststore fixture: $BUNDLE_JKS"
 }
 
