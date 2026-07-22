@@ -26,7 +26,7 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **build_jvm_truststore_macos.sh** | macOS (JVM) | Build installer-ready JKS from macOS system keychains |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
 | **validate_certs_debian_ubuntu.sh** | Debian/Ubuntu | Validate PEM and env config |
-| **build_jvm_truststore_linux.sh** | Linux (JVM) | Build installer-ready JKS from Linux system CA bundle plus a supplied PEM CA |
+| **build_jvm_truststore_linux.sh** | Linux (JVM) | Build installer-ready JKS from Linux system CA bundle |
 | **install_certs_jvm_linux.sh** | Linux (JVM) | Install bundled JVM truststore: JKS at `/etc/ssl/package-route-jvm/truststore.jks` + `JAVA_TOOL_OPTIONS` in `/etc/environment` |
 | **validate_certs_jvm_linux.sh** | Linux (JVM) | Validate bundled JVM truststore install (JKS subject + `/etc/environment` + shell-rc) |
 | **install_certs_jvm_rhel.sh** | RHEL (JVM) | Install PEM into RHEL-family system trust via `update-ca-trust extract` |
@@ -35,7 +35,7 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 | **validate_install_windows.ps1** | Windows | Validate PEM and env config |
 | **install_certs_jvm_windows.ps1** | Windows (JVM) | Install CA for Maven/Gradle/sbt/Ivy: JKS at `%LOCALAPPDATA%` + User-scope `JAVA_TOOL_OPTIONS` |
 | **validate_certs_jvm_windows.ps1** | Windows (JVM) | Validate JVM truststore install (JKS subject + User-scope env var) |
-| **build_jvm_truststore_windows.ps1** | Windows (JVM) | Build installer-ready JKS from Windows LocalMachine roots plus a supplied PEM CA |
+| **build_jvm_truststore_windows.ps1** | Windows (JVM) | Build installer-ready JKS from Windows LocalMachine roots |
 
 Environment variables by platform (see each section for details):
 
@@ -482,12 +482,10 @@ RHEL-family hosts that intentionally use Red Hat OpenJDK system trust should use
 
 ### Building the bundled truststore
 
-`build_jvm_truststore_linux.sh` creates the `--use-truststore` input for the generic Linux installer. It imports certificates from the host Linux system CA bundle, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+`build_jvm_truststore_linux.sh` creates the `--use-truststore` input for the generic Linux installer. It imports certificates from the host Linux system CA bundle into a JKS. Enterprise CAs already present there (e.g. Zscaler after OS trust install) are included automatically.
 
 ```bash
-./build_jvm_truststore_linux.sh \
-  --use-cert /tmp/ZscalerRoot0.pem \
-  --output /tmp/package-route-truststore.jks
+./build_jvm_truststore_linux.sh --output /tmp/package-route-truststore.jks
 
 sudo ./install_certs_jvm_linux.sh --use-truststore /tmp/package-route-truststore.jks
 ```
@@ -740,11 +738,10 @@ Exit code 0 if all checks pass, 1 otherwise. Result line is qualified with a cou
 
 ### Building the bundled truststore
 
-`build_jvm_truststore_windows.ps1` creates the `-UseTruststore` input for the Windows JVM installer. It imports Windows `LocalMachine\Root` certificates into a JKS truststore, then imports your supplied PEM CA under alias `package-route-custom-ca`.
+`build_jvm_truststore_windows.ps1` creates the `-UseTruststore` input for the Windows JVM installer. It imports Windows `LocalMachine\Root` certificates into a JKS. Enterprise CAs already present there (e.g. Zscaler via ZCC) are included automatically.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_jvm_truststore_windows.ps1 `
-  -UseCert C:\tmp\ZscalerRoot0.pem `
   -Output C:\tmp\package-route-truststore.jks
 
 powershell -ExecutionPolicy Bypass -File .\install_certs_jvm_windows.ps1 `

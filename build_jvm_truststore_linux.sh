@@ -1,55 +1,43 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Build a JVM truststore from the Linux system CA bundle plus one custom CA PEM.
+# Build a JVM truststore from the Linux system CA bundle.
 #
-# This is a build-time helper for the JVM installers. It does not install
-# anything and does not require root.
+# Enterprise CAs already in the system trust store (e.g. Zscaler via ZCC /
+# update-ca-certificates) are included automatically. This is a build-time
+# helper for the JVM installers — it does not install anything and does not
+# require root.
 #
 # Run:
-#   ./build_jvm_truststore_linux.sh --use-cert /path/to/company-ca.pem --output /tmp/package-route-truststore.jks
+#   ./build_jvm_truststore_linux.sh --output /tmp/package-route-truststore.jks
 
 set -euo pipefail
 
 JKS_PASSWORD="changeit"
-DEFAULT_CERT_ALIAS="package-route-custom-ca"
-
-USE_CERT=""
 OUTPUT=""
-CERT_ALIAS="$DEFAULT_CERT_ALIAS"
 SYSTEM_BUNDLE=""
 OPENSSL_BIN="${OPENSSL:-openssl}"
 
 usage() {
     cat <<EOF
 Usage:
-  $0 --use-cert <path> --output <path> [--cert-alias <alias>] [--system-bundle <path>]
+  $0 --output <path> [--system-bundle <path>]
 
 Options:
-  --use-cert <path>      PEM certificate to add to the truststore. Must contain
-                         exactly one non-expired CA certificate with CA:TRUE.
   --output <path>        Destination truststore path. Replaced atomically after
                          successful build.
-  --cert-alias <alias>   Alias for the custom CA (default: ${DEFAULT_CERT_ALIAS}).
   --system-bundle <path> Override the detected Linux system CA PEM bundle.
   -h, --help             Show this help.
 
-The generated truststore uses password '${JKS_PASSWORD}'.
+Imports certificates from the host system CA bundle into a JKS truststore
+(password '${JKS_PASSWORD}').
 EOF
 }
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --use-cert)
-                USE_CERT="${2:?Error: --use-cert requires a value}"
-                shift 2
-                ;;
             --output)
                 OUTPUT="${2:?Error: --output requires a value}"
-                shift 2
-                ;;
-            --cert-alias)
-                CERT_ALIAS="${2:?Error: --cert-alias requires a value}"
                 shift 2
                 ;;
             --system-bundle)
@@ -68,12 +56,7 @@ parse_args() {
         esac
     done
 
-    [[ -n "$USE_CERT" ]] || { echo "Error: --use-cert is required." >&2; usage >&2; exit 1; }
     [[ -n "$OUTPUT" ]] || { echo "Error: --output is required." >&2; usage >&2; exit 1; }
-    [[ "$CERT_ALIAS" =~ ^[A-Za-z0-9._-]+$ ]] || {
-        echo "Error: --cert-alias must match [A-Za-z0-9._-]+ (got: $CERT_ALIAS)." >&2
-        exit 1
-    }
 }
 
 check_dependencies() {
@@ -105,34 +88,6 @@ detect_system_bundle() {
 
     echo "Error: could not find a Linux system CA bundle. Pass --system-bundle <path>." >&2
     exit 1
-}
-
-validate_custom_pem() {
-    local path="$1" count bc
-
-    [[ -f "$path" && -r "$path" && -s "$path" ]] || {
-        echo "Error: --use-cert must point to a readable non-empty file: $path" >&2
-        exit 1
-    }
-
-    count="$(grep -c -- '-----BEGIN CERTIFICATE-----' "$path" 2>/dev/null || true)"
-    if [[ "$count" -ne 1 ]]; then
-        echo "Error: --use-cert must contain exactly one PEM certificate (found $count): $path" >&2
-        exit 1
-    fi
-    "$OPENSSL_BIN" x509 -in "$path" -noout >/dev/null 2>&1 || {
-        echo "Error: invalid PEM certificate: $path" >&2
-        exit 1
-    }
-    "$OPENSSL_BIN" x509 -in "$path" -checkend 0 -noout >/dev/null 2>&1 || {
-        echo "Error: certificate has already expired: $path" >&2
-        exit 1
-    }
-    bc="$("$OPENSSL_BIN" x509 -in "$path" -noout -ext basicConstraints 2>/dev/null || true)"
-    if ! grep -qi 'CA:TRUE' <<<"$bc"; then
-        echo "Error: certificate is not a CA (basicConstraints missing CA:TRUE): $path" >&2
-        exit 1
-    fi
 }
 
 split_pem_bundle() {
@@ -193,8 +148,6 @@ build_truststore() {
         exit 1
     fi
 
-    import_cert "$USE_CERT" "$CERT_ALIAS" "$tmp_store"
-
     mkdir -p "$(dirname "$OUTPUT")"
     mv "$tmp_store" "$OUTPUT"
     chmod 0644 "$OUTPUT"
@@ -205,14 +158,11 @@ build_truststore() {
     echo "  $system_bundle"
     echo "Imported system certificates:"
     echo "  $imported_count"
-    echo "Custom CA alias:"
-    echo "  $CERT_ALIAS"
 }
 
 main() {
     parse_args "$@"
     check_dependencies
-    validate_custom_pem "$USE_CERT"
 
     local system_bundle
     system_bundle="$(detect_system_bundle)"

@@ -1,24 +1,19 @@
 # (c) JFrog Ltd. (2026)
-# Build a JVM truststore from Windows LocalMachine root certificates plus one
-# custom CA PEM.
+# Build a JVM truststore from Windows LocalMachine root certificates.
 #
-# This is a build-time helper for the JVM installers. It does not install
-# anything and does not require Administrator rights for normal LocalMachine
-# Root read access.
+# Enterprise CAs already in LocalMachine\Root (e.g. Zscaler via ZCC) are
+# included automatically. This is a build-time helper for the JVM installers —
+# it does not install anything and does not require Administrator rights for
+# normal LocalMachine Root read access.
 #
 # Run:
-#   powershell -ExecutionPolicy Bypass -File .\build_jvm_truststore_windows.ps1 -UseCert C:\path\company-ca.pem -Output C:\Temp\package-route-truststore.jks
+#   powershell -ExecutionPolicy Bypass -File .\build_jvm_truststore_windows.ps1 `
+#     -Output C:\Temp\package-route-truststore.jks
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$UseCert,
-
-    [Parameter(Mandatory = $true)]
-    [string]$Output,
-
-    [Parameter(Mandatory = $false)]
-    [string]$CertAlias = 'package-route-custom-ca'
+    [string]$Output
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,55 +41,6 @@ function Get-Keytool {
     }
 
     Fail 'keytool.exe is required. Install a JDK or set JAVA_HOME.'
-}
-
-function Read-PemCertificate {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        Fail "Certificate file not found: $Path"
-    }
-
-    $raw = Get-Content -LiteralPath $Path -Raw
-    $matches = [regex]::Matches(
-        $raw,
-        '-----BEGIN CERTIFICATE-----\s*(?<body>[A-Za-z0-9+/=\r\n]+?)\s*-----END CERTIFICATE-----'
-    )
-    if ($matches.Count -ne 1) {
-        Fail "UseCert must contain exactly one PEM certificate (found $($matches.Count)): $Path"
-    }
-
-    try {
-        $base64 = ($matches[0].Groups['body'].Value -replace '\s', '')
-        $bytes = [Convert]::FromBase64String($base64)
-        return [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($bytes)
-    } catch {
-        Fail "Invalid PEM certificate: $Path ($($_.Exception.Message))"
-    }
-}
-
-function Test-CustomCaCertificate {
-    param(
-        [System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert,
-        [string]$Path
-    )
-
-    if ($Cert.NotAfter -le (Get-Date)) {
-        Fail "Certificate has already expired: $Path"
-    }
-
-    $basic = $Cert.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.19' } | Select-Object -First 1
-    if (-not $basic) {
-        Fail "Certificate is not a CA (basicConstraints missing CA:TRUE): $Path"
-    }
-
-    $constraints = [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(
-        $basic,
-        $basic.Critical
-    )
-    if (-not $constraints.CertificateAuthority) {
-        Fail "Certificate is not a CA (basicConstraints missing CA:TRUE): $Path"
-    }
 }
 
 function Invoke-Keytool {
@@ -151,13 +97,6 @@ function Get-SystemRootCertificates {
     }
 }
 
-if ($CertAlias -notmatch '^[A-Za-z0-9._-]+$') {
-    Fail "CertAlias must match [A-Za-z0-9._-]+ (got: $CertAlias)."
-}
-
-$customCert = Read-PemCertificate -Path $UseCert
-Test-CustomCaCertificate -Cert $customCert -Path $UseCert
-
 $keytool = Get-Keytool
 $outputParent = Split-Path -Parent $Output
 if ($outputParent) {
@@ -191,15 +130,12 @@ try {
         Fail 'No certificates could be imported from LocalMachine\Root.'
     }
 
-    Import-CertToTruststore -Keytool $keytool -CertPath $UseCert -Alias $CertAlias -TruststorePath $tempStore
     Move-Item -LiteralPath $tempStore -Destination $Output -Force
 
     Write-Host 'Built JVM truststore:'
     Write-Host "  $Output"
     Write-Host 'Imported Windows LocalMachine root certificates:'
     Write-Host "  $imported"
-    Write-Host 'Custom CA alias:'
-    Write-Host "  $CertAlias"
     Write-Host "Truststore password: $JksPassword"
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue

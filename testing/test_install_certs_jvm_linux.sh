@@ -4,7 +4,8 @@
 #
 # Runs:
 #   - generic Linux bundled-JKS flow on Debian/Ubuntu/Amazon Linux, using
-#     build_jvm_truststore_linux.sh to create the installer input
+#     build_jvm_truststore_linux.sh (system CA bundle) plus a lab CA injected
+#     into the fixture for a deterministic --expected-subject
 #   - RHEL update-ca-trust PEM flow on UBI/RHEL
 
 set -euo pipefail
@@ -33,9 +34,15 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 useradd -m -s /bin/bash devx >/dev/null 2>&1 || true
 
 build_bundle_truststore() {
+    # Builder is system-bundle-only; inject the lab CA into the fixture so
+    # --expected-subject stays deterministic in Docker (no ZCC / enterprise CA).
     ./build_jvm_truststore_linux.sh \
-        --use-cert /tmp/ca.pem \
         --output /tmp/bundled-truststore.jks >/dev/null
+    keytool -importcert -noprompt -storetype JKS \
+        -alias "lab-jvm-ca-final" \
+        -file /tmp/ca.pem \
+        -keystore /tmp/bundled-truststore.jks \
+        -storepass changeit >/dev/null
 }
 
 run_generic() {

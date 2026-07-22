@@ -5,9 +5,10 @@
 #   powershell -ExecutionPolicy Bypass -File testing/test_install_certs_jvm_windows.ps1
 #
 # No Administrator required -- User-scope env vars and %LOCALAPPDATA% paths
-# are per-user. The runner builds a bundled truststore fixture from Windows
-# LocalMachine root certificates plus a lab CA, then verifies the installer only
-# copies that ready-made JKS into place and configures HKCU\Environment.
+# are per-user. The runner builds a LocalMachine\Root-only JKS via
+# build_jvm_truststore_windows.ps1, then imports a lab CA into that fixture so
+# -ExpectedSubject stays deterministic. The installer only copies the JKS and
+# configures HKCU\Environment.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
@@ -177,9 +178,10 @@ function Invoke-Keytool {
 function Build-BundledTruststore {
     param([string]$CaPath)
     Remove-Item -LiteralPath $BundleJks -ErrorAction SilentlyContinue
+    # Builder is LocalMachine\Root only; inject the lab CA into the fixture so
+    # -ExpectedSubject stays deterministic (no ZCC / enterprise CA on the host).
     $raw = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
         -File '.\build_jvm_truststore_windows.ps1' `
-        -UseCert $CaPath `
         -Output $BundleJks 2>&1
     $rc = $LASTEXITCODE
     if ($rc -ne 0) {
@@ -188,6 +190,14 @@ function Build-BundledTruststore {
         Write-Host "--- end captured output ---"
         Fail-Test "build_jvm_truststore_windows.ps1 exited $rc"
     }
+    Invoke-Keytool -KeytoolArgs @(
+        '-importcert', '-noprompt',
+        '-storetype', 'JKS',
+        '-alias', 'lab-jvm-win-ca-test',
+        '-file', $CaPath,
+        '-keystore', $BundleJks,
+        '-storepass', 'changeit'
+    ) | Out-Null
     Write-Host ("Bundled truststore fixture: {0}" -f $BundleJks)
 }
 
