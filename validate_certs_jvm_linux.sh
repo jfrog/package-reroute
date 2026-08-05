@@ -3,34 +3,47 @@
 # Validate JVM truststore installation done by install_certs_jvm_linux.sh.
 #
 # Asserts:
-#   1. JKS truststore exists at /etc/ssl/package-route-jvm/truststore.jks
+#   1. JKS truststore exists at the path given by --use-truststore
 #   2. JKS contains a cert whose subject matches --expected-subject
-#   3. /etc/environment contains JAVA_TOOL_OPTIONS pointing at the JKS
+#   3. /etc/environment contains JAVA_TOOL_OPTIONS pointing at that path
 #   4. Current user's shell rc files reference the same value (WARN if missing)
 #   5. Current process inherited JAVA_TOOL_OPTIONS (HINT if missing)
 
 set -euo pipefail
 
-JKS_DIR="/etc/ssl/package-route-jvm"
-JKS_PATH="${JKS_DIR}/truststore.jks"
 JKS_PASSWORD="changeit"
 ENVIRONMENT_FILE="/etc/environment"
 
 ALL_USERS=0
 EXPECTED_SUBJECT=""
+USE_TRUSTSTORE=""
 
 usage() {
     cat <<EOF
 Usage:
-  $0 --expected-subject <substring> [--all-users]
+  $0 --expected-subject <substring> --use-truststore <path> [--all-users]
 
 Options:
   --expected-subject <substring>   Required. Case-insensitive substring match against the cert subject.
+  --use-truststore <path>          Required. Path to the IT-published JKS that install wired into
+                                   JAVA_TOOL_OPTIONS (same value passed to the installer).
   --all-users                      Validate /home/* users' rc files (requires root).
   -h, --help                       Show this help.
 
 Exits 0 if all checks pass, 1 if any check fails.
 EOF
+}
+
+canonicalize_path() {
+    local path="$1"
+    local dir base
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$path"
+        return 0
+    fi
+    dir="$(cd "$(dirname "$path")" && pwd)"
+    base="$(basename "$path")"
+    echo "${dir}/${base}"
 }
 
 parse_args() {
@@ -42,6 +55,10 @@ parse_args() {
                 ;;
             --expected-subject)
                 EXPECTED_SUBJECT="${2:?Error: --expected-subject requires a value}"
+                shift 2
+                ;;
+            --use-truststore)
+                USE_TRUSTSTORE="${2:?Error: --use-truststore requires a value}"
                 shift 2
                 ;;
             -h|--help)
@@ -62,8 +79,21 @@ parse_args() {
         exit 1
     fi
 
+    if [[ -z "$USE_TRUSTSTORE" ]]; then
+        echo "Error: --use-truststore is required." >&2
+        usage >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$USE_TRUSTSTORE" ]]; then
+        echo "Error: truststore file not found: $USE_TRUSTSTORE" >&2
+        exit 1
+    fi
+
+    USE_TRUSTSTORE="$(canonicalize_path "$USE_TRUSTSTORE")"
+
     if [[ "$ALL_USERS" -eq 1 && "$(id -u)" -ne 0 ]]; then
-        echo "Error: --all-users requires root. Use: sudo $0 --all-users --expected-subject ..." >&2
+        echo "Error: --all-users requires root. Use: sudo $0 --all-users --expected-subject ... --use-truststore ..." >&2
         exit 1
     fi
 }
@@ -107,6 +137,18 @@ validate_keystore_contains_subject() {
     return 0
 }
 
+jto_points_at_path() {
+    local jto_text="$1" jks_path="$2"
+    case "$jto_text" in
+        *"trustStore=\"${jks_path}\""*|*"trustStore=${jks_path} "*|*"trustStore=${jks_path}"*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 validate_export_in_file() {
     local file="$1" label="$2"
     if [[ ! -f "$file" ]]; then
@@ -117,16 +159,24 @@ validate_export_in_file() {
         warn "$label not readable by current user; re-run as that user or with sudo --all-users."
         return 0
     fi
-    if grep -qE "^export JAVA_TOOL_OPTIONS=.*trustStore=\"?${JKS_PATH}\"?" "$file" 2>/dev/null; then
-        ok "$label contains JAVA_TOOL_OPTIONS pointing at $JKS_PATH"
+    local line
+    line="$(grep -E '^export JAVA_TOOL_OPTIONS=' "$file" 2>/dev/null | head -1 || true)"
+    if [[ -z "$line" ]]; then
+        warn "$label has no JAVA_TOOL_OPTIONS export (current session may need re-login or 'source $file')"
         return 0
     fi
-    if grep -qE '^export JAVA_TOOL_OPTIONS=' "$file" 2>/dev/null; then
-        fail "$label has JAVA_TOOL_OPTIONS but it does not point at $JKS_PATH"
-        return 1
+    line="${line#export JAVA_TOOL_OPTIONS=}"
+    if [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
     fi
-    warn "$label has no JAVA_TOOL_OPTIONS export (current session may need re-login or 'source $file')"
-    return 0
+    line="${line//\\\"/\"}"
+    line="${line//\\\\/\\}"
+    if jto_points_at_path "$line" "$USE_TRUSTSTORE"; then
+        ok "$label contains JAVA_TOOL_OPTIONS pointing at $USE_TRUSTSTORE"
+        return 0
+    fi
+    fail "$label has JAVA_TOOL_OPTIONS but it does not point at $USE_TRUSTSTORE"
+    return 1
 }
 
 validate_environment_file() {
@@ -134,11 +184,23 @@ validate_environment_file() {
         fail "$ENVIRONMENT_FILE does not exist"
         return 1
     fi
-    if grep -qE "^JAVA_TOOL_OPTIONS=.*trustStore=\"?${JKS_PATH}\"?" "$ENVIRONMENT_FILE" 2>/dev/null; then
-        ok "$ENVIRONMENT_FILE contains JAVA_TOOL_OPTIONS pointing at $JKS_PATH"
+    local line
+    line="$(grep -E '^JAVA_TOOL_OPTIONS=' "$ENVIRONMENT_FILE" 2>/dev/null | head -1 || true)"
+    if [[ -z "$line" ]]; then
+        fail "$ENVIRONMENT_FILE has no JAVA_TOOL_OPTIONS pointing at $USE_TRUSTSTORE"
+        return 1
+    fi
+    line="${line#JAVA_TOOL_OPTIONS=}"
+    if [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
+    fi
+    line="${line//\\\"/\"}"
+    line="${line//\\\\/\\}"
+    if jto_points_at_path "$line" "$USE_TRUSTSTORE"; then
+        ok "$ENVIRONMENT_FILE contains JAVA_TOOL_OPTIONS pointing at $USE_TRUSTSTORE"
         return 0
     fi
-    fail "$ENVIRONMENT_FILE has no JAVA_TOOL_OPTIONS pointing at $JKS_PATH"
+    fail "$ENVIRONMENT_FILE has no JAVA_TOOL_OPTIONS pointing at $USE_TRUSTSTORE"
     return 1
 }
 
@@ -164,9 +226,10 @@ main() {
     parse_args "$@"
 
     echo "Expected subject (case-insensitive substring): $EXPECTED_SUBJECT"
+    echo "Truststore path: $USE_TRUSTSTORE"
     echo
 
-    validate_keystore_contains_subject "$JKS_PATH" "$JKS_PASSWORD" "Truststore $JKS_PATH" || true
+    validate_keystore_contains_subject "$USE_TRUSTSTORE" "$JKS_PASSWORD" "Truststore $USE_TRUSTSTORE" || true
     validate_environment_file || true
     validate_shell_rc_files
 

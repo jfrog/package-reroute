@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Install a bundled JVM truststore on macOS for JVM clients (Maven, Gradle,
+# Wire an IT-published JVM truststore on macOS for JVM clients (Maven, Gradle,
 # sbt, Apache Ivy).
 #
-# Single path: copy a supplied JKS truststore to
-#   ~/Library/Application Support/JFrog/package-route-jvm/truststore.jks
-# then set JAVA_TOOL_OPTIONS in the target user's ~/.zshrc (same pattern as
-# install_certs_macos.sh). KeychainStore is broken per JDK-8321045, so there
-# is no OS-trust fallback.
+# Single path: take a supplied JKS truststore path and set JAVA_TOOL_OPTIONS
+# in the target user's ~/.zshrc so every new JVM startup inherits that
+# trustStore path. The supplied path is the runtime location — this script
+# does not copy the file (IT publishes the ready JKS to a durable path of
+# its choosing). KeychainStore is broken per JDK-8321045, so there is no
+# OS-trust fallback.
 #
 # Run:
 #   sudo bash install_certs_jvm_macos.sh --use-truststore /path/to/truststore.jks
@@ -15,16 +16,16 @@
 #
 # Notes:
 #   - macOS only.
-#   - Must run as root (so per-user files can be chown'd to the target user).
+#   - Must run as root (so per-user ~/.zshrc can be chown'd to the target user).
 #   - JVM trust only — does not configure npm/Python/HF and does not touch
 #     Docker credentials. Pair with install_certs_macos.sh if you need those.
 #   - Users need a new terminal (or `source ~/.zshrc`) for the env var to
 #     take effect.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   install_certs_jvm_linux.sh       — bundled JKS + JAVA_TOOL_OPTIONS
+#   install_certs_jvm_linux.sh       — JAVA_TOOL_OPTIONS in /etc/environment
 #   install_certs_jvm_rhel.sh        — RHEL update-ca-trust
-#   install_certs_jvm_windows.ps1    — HKCU\Environment + per-user JKS
+#   install_certs_jvm_windows.ps1    — HKCU\Environment JAVA_TOOL_OPTIONS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/
@@ -33,8 +34,6 @@ set -euo pipefail
 
 # Keep this installer self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
-JKS_RELATIVE_DIR="Library/Application Support/JFrog/package-route-jvm"
-JKS_BASENAME="truststore.jks"
 JKS_PASSWORD="changeit"
 
 USE_TRUSTSTORE=""
@@ -47,23 +46,24 @@ Usage:
 
 Options:
   --use-truststore <path>
-                         Path to an existing JVM truststore (JKS/PKCS12-compatible)
-                         to copy into each target user's fixed JKS location.
-                         The truststore must be readable by JVMs with password
+                         Absolute or relative path to the IT-published JVM
+                         truststore (JKS/PKCS12-compatible). JAVA_TOOL_OPTIONS
+                         will point at this path (resolved to absolute). The
+                         truststore must be readable by JVMs with password
                          '${JKS_PASSWORD}'.
-  --all-users            Iterate /Users/* (UID >= 501, skip Shared) and install
-                         the JKS + ~/.zshrc export for every account. Default =
+  --all-users            Iterate /Users/* (UID >= 501, skip Shared) and write
+                         the ~/.zshrc export for every account. Default =
                          only SUDO_USER (or the console-user under JAMF).
   -h, --help             Show this help.
 
-Note: unlike the Linux sibling, macOS has only one install path (JKS +
-per-user ~/.zshrc JAVA_TOOL_OPTIONS). There is no --mode flag because the
+Note: unlike the Linux sibling, macOS has only one install path
+(per-user ~/.zshrc JAVA_TOOL_OPTIONS). There is no --mode flag because the
 KeychainStore truststoreType is broken (JDK-8321045) and no OS-trust
 fallback exists.
 
 Examples:
-  sudo $0 --use-truststore /tmp/package-route-truststore.jks
-  sudo $0 --use-truststore /tmp/package-route-truststore.jks --all-users
+  sudo $0 --use-truststore /Library/Managed/package-route-truststore.jks
+  sudo $0 --use-truststore /Library/Managed/package-route-truststore.jks --all-users
 EOF
 }
 
@@ -73,6 +73,20 @@ require_root() {
         echo "Use: sudo $0 --use-truststore <path> [--all-users]" >&2
         exit 1
     fi
+}
+
+# Resolve to an absolute path so relative --use-truststore values do not break
+# after the shell's cwd changes.
+canonicalize_path() {
+    local path="$1"
+    local dir base
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$path"
+        return 0
+    fi
+    dir="$(cd "$(dirname "$path")" && pwd)"
+    base="$(basename "$path")"
+    echo "${dir}/${base}"
 }
 
 parse_args() {
@@ -118,6 +132,8 @@ parse_args() {
         echo "Error: truststore file is empty: $USE_TRUSTSTORE" >&2
         exit 1
     fi
+
+    USE_TRUSTSTORE="$(canonicalize_path "$USE_TRUSTSTORE")"
 }
 
 check_os() {
@@ -129,18 +145,12 @@ check_os() {
     fi
 }
 
-jks_path_for_user() {
-    local user_home="$1"
-    echo "${user_home}/${JKS_RELATIVE_DIR}/${JKS_BASENAME}"
-}
-
 jto_value_for_path() {
     local jks_path="$1"
-    # The JKS path is under ~/Library/Application Support/ — the embedded
-    # space breaks unquoted JAVA_TOOL_OPTIONS at the JVM tokenizer (which
-    # splits on whitespace and only honours `"…"` grouping). Embed literal
-    # quotes around the path/password so they reach the JVM after .zshrc is
-    # sourced.
+    # Paths may contain spaces (e.g. under Application Support). The JVM
+    # tokenizer splits JAVA_TOOL_OPTIONS on whitespace and only honours
+    # `"…"` grouping. Embed literal quotes around the path/password so they
+    # reach the JVM after .zshrc is sourced.
     echo "-Djavax.net.ssl.trustStore=\"${jks_path}\" -Djavax.net.ssl.trustStorePassword=\"${JKS_PASSWORD}\""
 }
 
@@ -179,43 +189,12 @@ ensure_export_in_file() {
     fi
 }
 
-install_truststore_for_user() {
-    local target_user="$1" user_home="$2"
-    local jks_dir="${user_home}/${JKS_RELATIVE_DIR}"
-    local jks_path="${jks_dir}/${JKS_BASENAME}"
-
-    echo "  [JKS] Installing truststore at $jks_path"
-
-    # macOS mkdir -p will create the intermediate "Application Support" /
-    # "JFrog" / "package-route-jvm" tree if missing. Quote the path because
-    # "Application Support" contains a space.
-    mkdir -p "$jks_dir"
-
-    # The installer deliberately treats the supplied truststore as final. The
-    # release process that builds it owns root selection and CA contents.
-    cp "$USE_TRUSTSTORE" "$jks_path"
-
-    chmod 0755 "$jks_dir"
-    chmod 0644 "$jks_path"
-
-    # Hand ownership back to the target user so they can read/manage the JKS
-    # without sudo.
-    local chown_err
-    if ! chown_err="$(chown -R "$target_user" "$jks_dir" 2>&1)"; then
-        echo "Error: chown $target_user $jks_dir failed: $chown_err" >&2
-        exit 1
-    fi
-
-    echo "  [JKS] OK"
-}
-
 update_zshrc_for_user() {
     local target_user="$1" user_home="$2"
     local zshrc="${user_home}/.zshrc"
-    local jks_path jto_value
+    local jto_value
 
-    jks_path="$(jks_path_for_user "$user_home")"
-    jto_value="$(jto_value_for_path "$jks_path")"
+    jto_value="$(jto_value_for_path "$USE_TRUSTSTORE")"
 
     echo "  [zsh] Updating $zshrc"
 
@@ -281,10 +260,9 @@ install_for_user() {
     local target_user="$1" user_home="$2"
 
     echo "=== User: $target_user (home: $user_home) ==="
-    install_truststore_for_user "$target_user" "$user_home"
     update_zshrc_for_user "$target_user" "$user_home"
 
-    echo "  Truststore: $(jks_path_for_user "$user_home")"
+    echo "  Truststore: $USE_TRUSTSTORE"
     echo "  Shell rc:   ${user_home}/.zshrc"
 }
 

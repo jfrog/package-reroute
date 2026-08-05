@@ -8,19 +8,19 @@
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
 # fresh-state cases and via `trap EXIT`. The test runner builds a keychain-only
 # JKS via build_jvm_truststore_macos.sh, then imports a lab CA into that fixture
-# so --expected-subject stays deterministic. The installer only copies the JKS
-# and configures ~/.zshrc.
+# so --expected-subject stays deterministic. The installer wires ~/.zshrc
+# JAVA_TOOL_OPTIONS to the supplied truststore path (no copy).
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
-#   3. Idempotent re-install (copied JKS checksum stable; .zshrc export replaced)
+#   3. Idempotent re-install (single .zshrc export; points at supplied path)
 #   4. Missing --use-truststore is rejected
 #   5. Missing / empty truststore paths are rejected
-#   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS
+#   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the supplied JKS
 #   7. --all-users iterates /Users/* and installs into every eligible account
 #      (covers the iter_all_users filter + per-user chown contract)
-#   8. Installed JKS preserves public roots from the bundled truststore
+#   8. Supplied JKS preserves public roots from the bundled truststore
 #   9. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer
 
 set -euo pipefail
@@ -50,8 +50,6 @@ TEST_HOME="$(dscl . -read "/Users/${TEST_USER}" NFSHomeDirectory 2>/dev/null | a
 [[ -d "$TEST_HOME" ]] || fail_msg "home directory not found for $TEST_USER"
 TEST_UID="$(id -u "$TEST_USER")"
 
-JKS="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm/truststore.jks"
-JKS_DIR="${TEST_HOME}/Library/Application Support/JFrog/package-route-jvm"
 ZSHRC="${TEST_HOME}/.zshrc"
 BUNDLE_JKS="/tmp/jvm-mac-bundled-truststore.jks"
 ZSHRC_BACKUP=""
@@ -103,7 +101,6 @@ strip_jto_from_zshrc() {
 }
 
 cleanup() {
-    rm -rf "$JKS_DIR"
     strip_jto_from_zshrc
     rm -f /tmp/jvm-mac-empty-truststore.jks
 }
@@ -157,6 +154,9 @@ build_bundle_truststore() {
 
 require_keytool
 build_bundle_truststore /tmp/jvm-mac-test-ca.pem
+# Installer canonicalizes via realpath; /tmp is a symlink to /private/tmp on macOS.
+BUNDLE_JKS="$(realpath "$BUNDLE_JKS")"
+echo "Resolved truststore path: $BUNDLE_JKS"
 
 # Capture combined stdout/stderr to a tempfile and only dump it on an
 # *unexpected* exit. Negative tests need silence on the expected-fail path
@@ -220,37 +220,37 @@ cleanup
 # Positive cases let stdout through so a CI failure shows a useful log; only
 # negative cases (where we *expect* exit 1) silence both streams.
 SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-truststore "$BUNDLE_JKS"
-SUDO_USER="$TEST_USER" ./validate_certs_jvm_macos.sh --expected-subject "Lab JVM mac CA Test"
+SUDO_USER="$TEST_USER" ./validate_certs_jvm_macos.sh \
+    --expected-subject "Lab JVM mac CA Test" \
+    --use-truststore "$BUNDLE_JKS"
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
 echo "=== 2. negative: subject mismatch must exit 1 ==="
-if validate_as_test_user --expected-subject "Microsoft Root CA NoMatch"; then
+if validate_as_test_user --expected-subject "Microsoft Root CA NoMatch" --use-truststore "$BUNDLE_JKS"; then
     fail_msg "validator should have exited 1 on subject mismatch"
 fi
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 3. idempotency: 2nd install preserves bundled JKS / single .zshrc export ==="
+echo "=== 3. idempotency: 2nd install keeps single .zshrc export at supplied path ==="
 install_as_test_user --use-truststore "$BUNDLE_JKS"
-validate_as_test_user --expected-subject "Lab JVM mac CA Test"
+validate_as_test_user --expected-subject "Lab JVM mac CA Test" --use-truststore "$BUNDLE_JKS"
 
-bundle_sha="$(shasum -a 256 "$BUNDLE_JKS" | awk '{print $1}')"
-installed_sha="$(shasum -a 256 "$JKS" | awk '{print $1}')"
-[[ "$installed_sha" == "$bundle_sha" ]] || fail_msg "installed JKS checksum differs from bundled truststore"
-alias_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
+alias_count=$(keytool -list -keystore "$BUNDLE_JKS" -storepass changeit 2>/dev/null \
     | grep -c "trustedCertEntry" || true)
 alias_count=${alias_count:-0}
-corp_count=$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null \
-    | grep -cE "^package-route-custom-ca[,[:space:]]" || true)
-corp_count=${corp_count:-0}
-[[ "$corp_count" -eq 1 ]] || fail_msg "expected exactly 1 corporate-CA alias after 2 installs, got $corp_count"
 [[ "$alias_count" -ge 100 ]] || fail_msg "expected JKS to include macOS system roots (>=100 aliases), got $alias_count"
 jto_count=$(grep -cE '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" || true)
 [[ "$jto_count" -eq 1 ]] || fail_msg "expected exactly 1 JAVA_TOOL_OPTIONS export in .zshrc, got $jto_count"
-echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
+jto="$(get_zshrc_jto)" || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
+case "$jto" in
+    *"trustStore=\"${BUNDLE_JKS}\""*|*"trustStore=${BUNDLE_JKS}"*) ;;
+    *) fail_msg ".zshrc JAVA_TOOL_OPTIONS mismatch after re-install (got: $jto)" ;;
+esac
+echo "  ok (alias_count=$alias_count)"
 
 #-----------------------------------------------------------------------------
 echo
@@ -282,12 +282,12 @@ echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 7. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the JKS ==="
+echo "=== 7. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the supplied JKS ==="
 cleanup
 install_as_test_user --use-truststore "$BUNDLE_JKS"
 jto="$(get_zshrc_jto)" || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
 case "$jto" in
-    *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) echo "  ok" ;;
+    *"trustStore=\"${BUNDLE_JKS}\""*|*"trustStore=${BUNDLE_JKS}"*) echo "  ok" ;;
     *) fail_msg ".zshrc JAVA_TOOL_OPTIONS mismatch (got: $jto)" ;;
 esac
 
@@ -322,7 +322,7 @@ echo "=== 9. JKS extends bundled public roots ==="
 # holding only the corporate CA would break every public-CA TLS handshake
 # (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors).
 # The shipped bundle must therefore include public roots before install.
-alias_count="$(keytool -list -keystore "$JKS" -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
+alias_count="$(keytool -list -keystore "$BUNDLE_JKS" -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
 alias_count="${alias_count:-0}"
 [[ "$alias_count" -ge 100 ]] \
     || fail_msg "JKS has $alias_count aliases; expected >= 100 (macOS system roots + corporate CA)"
@@ -333,17 +333,16 @@ echo "=== 10. JKS contains a well-known public root (DigiCert family) ==="
 # Spot-check the merge actually happened. DigiCert root certs ship in every
 # macOS system trust bundle under several names; case-insensitive substring
 # match catches the family.
-keytool -list -v -keystore "$JKS" -storepass changeit 2>/dev/null \
+keytool -list -v -keystore "$BUNDLE_JKS" -storepass changeit 2>/dev/null \
     | grep -qi 'digicert' \
     || fail_msg "JKS missing the DigiCert family of public roots; the system-root bundle is incomplete"
 echo "  ok"
 
 echo
 echo "=== 11. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
-# Direct repro of the "Application Support" space-tokenisation bug. Spawn a
-# child java -version with the .zshrc export value and assert the JVM does
-# NOT print "Unrecognized option" — that's what an unquoted trustStore path
-# produced before the quoting fix.
+# Spawn a child java -version with the .zshrc export value and assert the JVM
+# does NOT print "Unrecognized option" — that's what an unquoted trustStore
+# path with spaces produced before the quoting fix.
 jto_seen="$(get_zshrc_jto)" || fail_msg ".zshrc missing JAVA_TOOL_OPTIONS for tokenizer check"
 java_out="$(JAVA_TOOL_OPTIONS="$jto_seen" java -version 2>&1 || true)"
 if grep -q 'Unrecognized option' <<<"$java_out"; then

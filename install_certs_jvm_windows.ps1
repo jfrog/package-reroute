@@ -1,12 +1,12 @@
 ﻿# (c) JFrog Ltd. (2026)
-# Install a bundled JVM truststore on Windows for JVM clients (Maven, Gradle,
+# Wire an IT-published JVM truststore on Windows for JVM clients (Maven, Gradle,
 # sbt, Apache Ivy).
 #
-# Single path: copy a supplied JKS truststore to
-#   %LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks
-# then set JAVA_TOOL_OPTIONS at User scope
-# (HKCU\Environment + WM_SETTINGCHANGE broadcast) so every new JVM startup
-# inherits the trustStore path.
+# Single path: take a supplied JKS truststore path and set JAVA_TOOL_OPTIONS
+# at User scope (HKCU\Environment + WM_SETTINGCHANGE broadcast) so every new
+# JVM startup inherits that trustStore path. The supplied path is the runtime
+# location — this script does not copy the file (IT publishes the ready JKS
+# to a durable path of its choosing).
 #
 # Run:
 #   powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseTruststore C:\path\to\truststore.jks
@@ -29,9 +29,9 @@
 #     across Linux/macOS/Windows and works for developers on older Gradle.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   install_certs_jvm_linux.sh       - bundled JKS + JAVA_TOOL_OPTIONS
+#   install_certs_jvm_linux.sh       - JAVA_TOOL_OPTIONS in /etc/environment
 #   install_certs_jvm_rhel.sh        - RHEL update-ca-trust
-#   install_certs_jvm_macos.sh       - ~/.zshrc + per-user JKS
+#   install_certs_jvm_macos.sh       - ~/.zshrc JAVA_TOOL_OPTIONS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/
@@ -46,14 +46,8 @@ $ErrorActionPreference = 'Stop'
 
 # Keep this installer self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
-$JvmWindowsJksRelativeDir = 'JFrog\package-route-jvm'
-$JvmWindowsJksBasename = 'truststore.jks'
 $JvmWindowsJksPassword = 'changeit'
 $JvmWindowsEnvVarName = 'JAVA_TOOL_OPTIONS'
-
-function Get-JvmWindowsJksPath {
-    Join-Path $env:LOCALAPPDATA (Join-Path $JvmWindowsJksRelativeDir $JvmWindowsJksBasename)
-}
 
 function Show-Usage {
     @'
@@ -61,10 +55,10 @@ Usage:
   powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseTruststore <path>
 
 Parameters:
-  -UseTruststore <path>  Path to an existing JVM truststore (JKS/PKCS12-compatible)
-                         to copy into the current user's fixed JKS location.
-                         The truststore must be readable by JVMs with password
-                         'changeit'.
+  -UseTruststore <path>  Path to the IT-published JVM truststore
+                         (JKS/PKCS12-compatible). JAVA_TOOL_OPTIONS will point
+                         at this path (resolved to absolute). The truststore
+                         must be readable by JVMs with password 'changeit'.
 
 Notes:
   No -AllUsers flag -- User-scope env var is per-user by construction; each
@@ -74,7 +68,7 @@ Notes:
   but the JKS recipe stays uniform across platforms).
 
 Examples:
-  powershell -File install_certs_jvm_windows.ps1 -UseTruststore C:\tmp\package-route-truststore.jks
+  powershell -File install_certs_jvm_windows.ps1 -UseTruststore C:\ProgramData\JFrog\package-route-truststore.jks
 '@
 }
 
@@ -103,44 +97,6 @@ function Test-Truststore {
     }
 }
 
-function Install-JksTruststore {
-    param(
-        [string]$JksPath,
-        [string]$SourceTruststore
-    )
-
-    # Precondition: %LOCALAPPDATA% must exist and be writable. OneDrive
-    # Known-Folder-Move, roaming-profile misconfiguration, and IT GPO
-    # restrictions are the common failure modes; without this check the
-    # New-Item below would throw a generic .NET path message that doesn't
-    # hint at profile redirection.
-    if ([string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
-        Write-Error 'Error: %LOCALAPPDATA% is empty. Cannot place the JKS truststore. Are you running under a service account or a profile that has not been provisioned?'
-        exit 1
-    }
-    if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
-        Write-Error ("Error: %LOCALAPPDATA% ({0}) does not exist on this filesystem. OneDrive Known-Folder-Move or roaming-profile failure?" -f $env:LOCALAPPDATA)
-        exit 1
-    }
-
-    $jksDir = Split-Path -Parent $JksPath
-    if (-not (Test-Path -LiteralPath $jksDir)) {
-        New-Item -ItemType Directory -Path $jksDir -Force | Out-Null
-    }
-
-    Write-Host ("  [JKS] Installing truststore at {0}" -f $JksPath)
-    $sourcePath = (Resolve-Path -LiteralPath $SourceTruststore).Path
-    if (Test-Path -LiteralPath $JksPath -PathType Leaf) {
-        $destPath = (Resolve-Path -LiteralPath $JksPath).Path
-        if ([string]::Equals($sourcePath, $destPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Host "  [JKS] Source already matches destination; leaving truststore in place."
-            return
-        }
-    }
-    Copy-Item -LiteralPath $sourcePath -Destination $JksPath -Force
-    Write-Host "  [JKS] OK"
-}
-
 function Set-JavaToolOptions {
     param(
         [string]$JksPath,
@@ -153,9 +109,9 @@ function Set-JavaToolOptions {
     # toolchains do not -- daemons and IDE processes still need a fresh
     # session before the env var reaches a new java -version.
     #
-    # Both trustStore and trustStorePassword values are quoted so a future
-    # password change to one containing spaces doesn't tokenize wrongly when
-    # the JVM splits JAVA_TOOL_OPTIONS.
+    # Both trustStore and trustStorePassword values are quoted so a path or
+    # password containing spaces doesn't tokenize wrongly when the JVM
+    # splits JAVA_TOOL_OPTIONS.
     $jtoValue = '-Djavax.net.ssl.trustStore="{0}" -Djavax.net.ssl.trustStorePassword="{1}"' -f $JksPath, $Password
 
     Write-Host ("  [Env] Setting User-scope {0}" -f $JvmWindowsEnvVarName)
@@ -205,10 +161,7 @@ function Show-DoneSummary {
 function Main {
     Test-Truststore -Path $UseTruststore
 
-    $jksPath = Get-JvmWindowsJksPath
-    Install-JksTruststore `
-        -JksPath  $jksPath `
-        -SourceTruststore $UseTruststore
+    $jksPath = (Resolve-Path -LiteralPath $UseTruststore).Path
 
     $jtoValue = Set-JavaToolOptions `
         -JksPath  $jksPath `

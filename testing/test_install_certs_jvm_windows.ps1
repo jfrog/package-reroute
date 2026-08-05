@@ -4,22 +4,22 @@
 # Run from the repo root:
 #   powershell -ExecutionPolicy Bypass -File testing/test_install_certs_jvm_windows.ps1
 #
-# No Administrator required -- User-scope env vars and %LOCALAPPDATA% paths
-# are per-user. The runner builds a LocalMachine\Root-only JKS via
-# build_jvm_truststore_windows.ps1, then imports a lab CA into that fixture so
-# -ExpectedSubject stays deterministic. The installer only copies the JKS and
-# configures HKCU\Environment.
+# No Administrator required -- User-scope env vars are per-user. The runner
+# builds a LocalMachine\Root-only JKS via build_jvm_truststore_windows.ps1,
+# then imports a lab CA into that fixture so -ExpectedSubject stays
+# deterministic. The installer wires HKCU\Environment JAVA_TOOL_OPTIONS to
+# the supplied truststore path (no copy).
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
-#   3. Idempotent re-install (copied JKS checksum stable; env var replaced)
+#   3. Idempotent re-install (env var replaced; points at supplied path)
 #   4. Missing / empty truststore paths are rejected
-#   5. User-scope JAVA_TOOL_OPTIONS references the expected JKS
+#   5. User-scope JAVA_TOOL_OPTIONS references the supplied JKS
 #   6. JTO env var REPLACES (not appends) on re-install
 #   7. Mandatory -UseTruststore: no-args invocation fails non-interactively
-#   8. Installed JKS preserves public roots from the bundled truststore
-#   9. Installed JKS contains a well-known public root (DigiCert family)
+#   8. Supplied JKS preserves public roots from the bundled truststore
+#   9. Supplied JKS contains a well-known public root (DigiCert family)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -53,14 +53,6 @@ if (-not $OpenSsl) {
 Write-Host ("Using openssl: {0}" -f $OpenSsl)
 Write-Host ((& $OpenSsl version) 2>&1)
 
-$JvmWindowsJksRelativeDir = 'JFrog\package-route-jvm'
-$JvmWindowsJksBasename = 'truststore.jks'
-function Get-JvmWindowsJksPath {
-    Join-Path $env:LOCALAPPDATA (Join-Path $JvmWindowsJksRelativeDir $JvmWindowsJksBasename)
-}
-
-$JksPath   = Get-JvmWindowsJksPath
-$JksDir    = Split-Path -Parent $JksPath
 $LabSubj   = 'Lab JVM Win CA Test'
 $BundleJks = 'C:\Windows\Temp\jvm-win-bundled-truststore.jks'
 
@@ -68,13 +60,6 @@ function Cleanup {
     # Reset JAVA_TOOL_OPTIONS regardless of prior state. Setting to $null
     # via SetEnvironmentVariable deletes the value.
     [Environment]::SetEnvironmentVariable('JAVA_TOOL_OPTIONS', $null, [EnvironmentVariableTarget]::User)
-    if (Test-Path -LiteralPath $JksDir) {
-        try {
-            Remove-Item -LiteralPath $JksDir -Recurse -Force -ErrorAction Stop
-        } catch {
-            Write-Warning "Cleanup: could not remove $JksDir ($($_.Exception.Message)). A previous process may still hold a file handle; subsequent tests will likely fail."
-        }
-    }
     Remove-Item -LiteralPath 'C:\Windows\Temp\jvm-win-empty-truststore.jks' -ErrorAction SilentlyContinue
 }
 
@@ -202,43 +187,38 @@ function Build-BundledTruststore {
 }
 
 Build-BundledTruststore -CaPath $labCa
+$ResolvedBundle = (Resolve-Path -LiteralPath $BundleJks).Path
 
 #-----------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== 1. positive: install + validate ==="
 Cleanup
 Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
-Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj) | Out-Null
+Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj, '-UseTruststore', $BundleJks) | Out-Null
 Write-Host "  ok"
 
 #-----------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== 2. negative: subject mismatch must exit 1 ==="
-Invoke-Validator -ScriptArgs @('-ExpectedSubject', 'Microsoft Root CA NoMatch') -ExpectFail | Out-Null
+Invoke-Validator -ScriptArgs @('-ExpectedSubject', 'Microsoft Root CA NoMatch', '-UseTruststore', $BundleJks) -ExpectFail | Out-Null
 Write-Host "  ok"
 
 #-----------------------------------------------------------------------------
 Write-Host ""
-Write-Host "=== 3. idempotency: 2nd install preserves bundled JKS / single env value ==="
+Write-Host "=== 3. idempotency: 2nd install keeps single env value at supplied path ==="
 Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
-Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj) | Out-Null
+Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj, '-UseTruststore', $BundleJks) | Out-Null
 
-$bundleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $BundleJks).Hash
-$installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $JksPath).Hash
-if ($installedHash -ne $bundleHash) {
-    Fail-Test "installed JKS checksum differs from bundled truststore"
-}
-
-$listOut = Invoke-Keytool -KeytoolArgs @('-list', '-keystore', $JksPath, '-storepass', 'changeit')
+$listOut = Invoke-Keytool -KeytoolArgs @('-list', '-keystore', $BundleJks, '-storepass', 'changeit')
 $aliasCount = (($listOut | Select-String 'trustedCertEntry').Matches.Count)
-$corpCount = (($listOut | Select-String '^package-route-custom-ca[,\s]').Matches.Count)
-if ($corpCount -ne 1) {
-    Fail-Test "expected exactly 1 corporate-CA alias after 2 installs, got $corpCount"
-}
 if ($aliasCount -lt 100) {
     Fail-Test "expected JKS to preserve bundled public roots (>=100 aliases), got $aliasCount"
 }
-Write-Host ("  ok (alias_count={0}, corp_alias_count={1}, sha={2})" -f $aliasCount, $corpCount, $installedHash)
+$jto = [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', [EnvironmentVariableTarget]::User)
+if (-not ($jto -like "*trustStore=`"$ResolvedBundle`"*") -and -not ($jto -like "*trustStore=$ResolvedBundle*")) {
+    Fail-Test ("JAVA_TOOL_OPTIONS doesn't reference supplied JKS after re-install. got: {0}" -f $jto)
+}
+Write-Host ("  ok (alias_count={0})" -f $aliasCount)
 
 #-----------------------------------------------------------------------------
 Write-Host ""
@@ -254,14 +234,14 @@ Write-Host "  ok"
 
 #-----------------------------------------------------------------------------
 Write-Host ""
-Write-Host "=== 6. User-scope JAVA_TOOL_OPTIONS references the expected JKS ==="
+Write-Host "=== 6. User-scope JAVA_TOOL_OPTIONS references the supplied JKS ==="
 Cleanup
 Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 $jto = [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', [EnvironmentVariableTarget]::User)
 if (-not $jto) {
     Fail-Test 'User-scope JAVA_TOOL_OPTIONS not set'
 }
-if (-not ($jto -like "*trustStore=*$JksPath*")) {
+if (-not ($jto -like "*trustStore=*$ResolvedBundle*")) {
     Fail-Test ("JAVA_TOOL_OPTIONS doesn't reference expected JKS path. got: {0}" -f $jto)
 }
 Write-Host "  ok"
@@ -295,7 +275,7 @@ Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 
 Write-Host ""
 Write-Host "=== 9. JKS preserves bundled public roots ==="
-$listOut9 = Invoke-Keytool -KeytoolArgs @('-list', '-keystore', $JksPath, '-storepass', 'changeit')
+$listOut9 = Invoke-Keytool -KeytoolArgs @('-list', '-keystore', $BundleJks, '-storepass', 'changeit')
 $aliasCount = (($listOut9 | Select-String 'trustedCertEntry').Matches.Count)
 if ($aliasCount -lt 100) {
     Fail-Test "JKS has $aliasCount aliases; expected >= 100 (bundled public roots + corporate CA)"
@@ -304,7 +284,7 @@ Write-Host ("  ok ({0} aliases)" -f $aliasCount)
 
 Write-Host ""
 Write-Host "=== 10. JKS contains a well-known public root (DigiCert family) ==="
-$listOut10 = Invoke-Keytool -KeytoolArgs @('-list', '-v', '-keystore', $JksPath, '-storepass', 'changeit')
+$listOut10 = Invoke-Keytool -KeytoolArgs @('-list', '-v', '-keystore', $BundleJks, '-storepass', 'changeit')
 if (-not ($listOut10 | Select-String -Pattern 'digicert' -SimpleMatch -Quiet)) {
     Fail-Test "JKS missing the DigiCert family of public roots; the bundled truststore fixture is incomplete"
 }

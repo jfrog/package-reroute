@@ -47,33 +47,35 @@ build_bundle_truststore() {
 
 run_generic() {
     build_bundle_truststore
+    # Installer canonicalizes via realpath; keep comparisons aligned.
+    local bundle
+    bundle="$(realpath /tmp/bundled-truststore.jks)"
 
     echo "=== generic: positive install + validate ==="
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore /tmp/bundled-truststore.jks >/dev/null
-    ./validate_certs_jvm_linux.sh --expected-subject "Lab JVM CA Final" >/dev/null
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
+    ./validate_certs_jvm_linux.sh --expected-subject "Lab JVM CA Final" --use-truststore "$bundle" >/dev/null
     echo "  ok"
 
     echo "=== generic: subject mismatch must exit 1 ==="
-    if ./validate_certs_jvm_linux.sh --expected-subject "Microsoft Root CA NoMatch" >/dev/null 2>&1; then
+    if ./validate_certs_jvm_linux.sh --expected-subject "Microsoft Root CA NoMatch" --use-truststore "$bundle" >/dev/null 2>&1; then
         fail "validator should have exited 1 on subject mismatch"
     fi
     echo "  ok"
 
-    echo "=== generic: idempotent re-install preserves bundled JKS ==="
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore /tmp/bundled-truststore.jks >/dev/null
-    bundle_sha="$(sha256sum /tmp/bundled-truststore.jks | awk '{print $1}')"
-    installed_sha="$(sha256sum /etc/ssl/package-route-jvm/truststore.jks | awk '{print $1}')"
-    [[ "$installed_sha" == "$bundle_sha" ]] || fail "installed JKS checksum differs from bundle"
+    echo "=== generic: idempotent re-install keeps single JTO pointing at supplied path ==="
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
     env_lines="$(grep -c '^JAVA_TOOL_OPTIONS=' /etc/environment 2>/dev/null || true)"
     rc_lines="$(grep -c '^export JAVA_TOOL_OPTIONS=' /home/devx/.bashrc 2>/dev/null || true)"
     [[ "${env_lines:-0}" -eq 1 ]] || fail "/etc/environment has $env_lines JAVA_TOOL_OPTIONS lines (expected 1)"
     [[ "${rc_lines:-0}" -eq 1 ]] || fail "/home/devx/.bashrc has $rc_lines export lines (expected 1)"
+    grep -q "trustStore=\"${bundle}\"" /etc/environment \
+        || fail "/etc/environment JAVA_TOOL_OPTIONS does not point at $bundle"
     echo "  ok"
 
     echo "=== generic: JTO env var REPLACES (not appends) on re-install ==="
     sed -i '/^JAVA_TOOL_OPTIONS=/d' /etc/environment
     echo 'JAVA_TOOL_OPTIONS="-Dpackage-reroute-test-sentinel=must-be-replaced"' >> /etc/environment
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore /tmp/bundled-truststore.jks >/dev/null
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
     if grep -q 'package-reroute-test-sentinel' /etc/environment; then
         fail "JTO env var was APPENDED to (sentinel survived). Re-install must replace."
     fi
@@ -90,9 +92,9 @@ run_generic() {
     echo "  ok"
 
     echo "=== generic: JKS preserves bundled public roots ==="
-    alias_count="$(keytool -list -keystore /etc/ssl/package-route-jvm/truststore.jks -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
+    alias_count="$(keytool -list -keystore "$bundle" -storepass changeit 2>/dev/null | grep -c 'trustedCertEntry' || true)"
     [[ "${alias_count:-0}" -ge 100 ]] || fail "truststore has $alias_count aliases; expected >= 100"
-    keytool -list -v -keystore /etc/ssl/package-route-jvm/truststore.jks -storepass changeit 2>/dev/null \
+    keytool -list -v -keystore "$bundle" -storepass changeit 2>/dev/null \
         | grep -qi 'digicert' \
         || fail "truststore is missing the DigiCert family of public roots"
     echo "  ok ($alias_count aliases)"
