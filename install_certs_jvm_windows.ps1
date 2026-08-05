@@ -1,15 +1,16 @@
 ﻿# (c) JFrog Ltd. (2026)
-# Wire an IT-published JVM truststore on Windows for JVM clients (Maven, Gradle,
-# sbt, Apache Ivy).
+# Download a JVM truststore and wire it on Windows for JVM clients (Maven,
+# Gradle, sbt, Apache Ivy).
 #
-# Single path: take a supplied JKS truststore path and set JAVA_TOOL_OPTIONS
-# at User scope (HKCU\Environment + WM_SETTINGCHANGE broadcast) so every new
-# JVM startup inherits that trustStore path. The supplied path is the runtime
-# location — this script does not copy the file (IT publishes the ready JKS
-# to a durable path of its choosing).
+# Single path: download a JKS from -TruststoreUrl into
+#   %LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks
+# then set JAVA_TOOL_OPTIONS at User scope
+# (HKCU\Environment + WM_SETTINGCHANGE broadcast) so every new JVM startup
+# inherits the trustStore path.
 #
 # Run:
-#   powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseTruststore C:\path\to\truststore.jks
+#   powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 `
+#     -TruststoreUrl https://example/truststore.jks
 #
 # Notes:
 #   - Windows only.
@@ -29,9 +30,9 @@
 #     across Linux/macOS/Windows and works for developers on older Gradle.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   install_certs_jvm_linux.sh       - JAVA_TOOL_OPTIONS in /etc/environment
+#   install_certs_jvm_linux.sh       - download + JAVA_TOOL_OPTIONS in /etc/environment
 #   install_certs_jvm_rhel.sh        - RHEL update-ca-trust
-#   install_certs_jvm_macos.sh       - ~/.zshrc JAVA_TOOL_OPTIONS
+#   install_certs_jvm_macos.sh       - download + ~/.zshrc JAVA_TOOL_OPTIONS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/
@@ -39,26 +40,33 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$UseTruststore
+    [string]$TruststoreUrl
 )
 
 $ErrorActionPreference = 'Stop'
 
 # Keep this installer self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
+$JvmWindowsJksRelativeDir = 'JFrog\package-route-jvm'
+$JvmWindowsJksBasename = 'truststore.jks'
 $JvmWindowsJksPassword = 'changeit'
 $JvmWindowsEnvVarName = 'JAVA_TOOL_OPTIONS'
+
+function Get-JvmWindowsJksPath {
+    Join-Path $env:LOCALAPPDATA (Join-Path $JvmWindowsJksRelativeDir $JvmWindowsJksBasename)
+}
 
 function Show-Usage {
     @'
 Usage:
-  powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -UseTruststore <path>
+  powershell -ExecutionPolicy Bypass -File install_certs_jvm_windows.ps1 -TruststoreUrl <url>
 
 Parameters:
-  -UseTruststore <path>  Path to the IT-published JVM truststore
-                         (JKS/PKCS12-compatible). JAVA_TOOL_OPTIONS will point
-                         at this path (resolved to absolute). The truststore
-                         must be readable by JVMs with password 'changeit'.
+  -TruststoreUrl <url>  Download the JVM truststore (JKS/PKCS12-compatible)
+                        from this URL into the current user's fixed JKS
+                        location, then wire JAVA_TOOL_OPTIONS to that path.
+                        The truststore must be readable by JVMs with password
+                        'changeit'.
 
 Notes:
   No -AllUsers flag -- User-scope env var is per-user by construction; each
@@ -68,33 +76,53 @@ Notes:
   but the JKS recipe stays uniform across platforms).
 
 Examples:
-  powershell -File install_certs_jvm_windows.ps1 -UseTruststore C:\ProgramData\JFrog\package-route-truststore.jks
+  powershell -File install_certs_jvm_windows.ps1 -TruststoreUrl https://artifacts.example.com/package-route-truststore.jks
 '@
 }
 
-function Test-Truststore {
-    param([string]$Path)
+function Install-JksTruststore {
+    param(
+        [string]$JksPath,
+        [string]$Url
+    )
 
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        Write-Error "Error: truststore file not found: $Path"
+    # Precondition: %LOCALAPPDATA% must exist and be writable. OneDrive
+    # Known-Folder-Move, roaming-profile misconfiguration, and IT GPO
+    # restrictions are the common failure modes; without this check the
+    # New-Item below would throw a generic .NET path message that doesn't
+    # hint at profile redirection.
+    if ([string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
+        Write-Error 'Error: %LOCALAPPDATA% is empty. Cannot place the JKS truststore. Are you running under a service account or a profile that has not been provisioned?'
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $env:LOCALAPPDATA)) {
+        Write-Error ("Error: %LOCALAPPDATA% ({0}) does not exist on this filesystem. OneDrive Known-Folder-Move or roaming-profile failure?" -f $env:LOCALAPPDATA)
         exit 1
     }
 
-    $item = Get-Item -LiteralPath $Path
-    if ($item.Length -le 0) {
-        Write-Error "Error: truststore file is empty: $Path"
-        exit 1
+    $jksDir = Split-Path -Parent $JksPath
+    if (-not (Test-Path -LiteralPath $jksDir)) {
+        New-Item -ItemType Directory -Path $jksDir -Force | Out-Null
     }
 
-    $stream = $null
+    Write-Host ("  [JKS] Downloading truststore from {0}" -f $Url)
+    $tmpPath = Join-Path $jksDir ("truststore.download.{0}.tmp" -f [Guid]::NewGuid().ToString('N'))
     try {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        Invoke-WebRequest -Uri $Url -OutFile $tmpPath -UseBasicParsing
+        $item = Get-Item -LiteralPath $tmpPath
+        if ($item.Length -le 0) {
+            Write-Error ("Error: downloaded truststore is empty: {0}" -f $Url)
+            exit 1
+        }
+        Move-Item -LiteralPath $tmpPath -Destination $JksPath -Force
     } catch {
-        Write-Error "Error: truststore file is not readable: $Path ($($_.Exception.Message))"
+        if (Test-Path -LiteralPath $tmpPath) {
+            Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        }
+        Write-Error ("Error: failed to download truststore from {0}: {1}" -f $Url, $_.Exception.Message)
         exit 1
-    } finally {
-        if ($stream) { $stream.Dispose() }
     }
+    Write-Host ("  [JKS] Installed at {0}" -f $JksPath)
 }
 
 function Set-JavaToolOptions {
@@ -159,9 +187,8 @@ function Show-DoneSummary {
 }
 
 function Main {
-    Test-Truststore -Path $UseTruststore
-
-    $jksPath = (Resolve-Path -LiteralPath $UseTruststore).Path
+    $jksPath = Get-JvmWindowsJksPath
+    Install-JksTruststore -JksPath $jksPath -Url $TruststoreUrl
 
     $jtoValue = Set-JavaToolOptions `
         -JksPath  $jksPath `

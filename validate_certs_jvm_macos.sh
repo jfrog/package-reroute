@@ -2,16 +2,14 @@
 # (c) JFrog Ltd. (2026)
 # Validate JVM truststore installation done by install_certs_jvm_macos.sh.
 #
-# Asserts, per user:
-#   1. JKS file exists at the path given by --use-truststore
+# Asserts:
+#   1. JKS file exists at /Library/Application Support/JFrog/package-route-jvm/truststore.jks
 #   2. JKS contains a cert whose subject matches --expected-subject
-#   3. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at that JKS path
+#   3. Per user, ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at that system JKS path
 #
 # Run:
-#   bash validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" \
-#       --use-truststore /path/to/truststore.jks
-#   sudo bash validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" \
-#       --use-truststore /path/to/truststore.jks --all-users
+#   bash validate_certs_jvm_macos.sh --expected-subject "O=Zscaler"
+#   sudo bash validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
 #
 # Exit 0 = all checks passed; 1 = at least one failure.
 #
@@ -26,40 +24,28 @@ set -euo pipefail
 
 # Keep this validator self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
+JKS_DIR="/Library/Application Support/JFrog/package-route-jvm"
+JKS_PATH="${JKS_DIR}/truststore.jks"
 JKS_PASSWORD="changeit"
 
 ALL_USERS=0
 EXPECTED_SUBJECT=""
-USE_TRUSTSTORE=""
 
 usage() {
     cat <<EOF
 Usage:
-  $0 --expected-subject <substring> --use-truststore <path> [--all-users] [--cert-name <name>]
+  $0 --expected-subject <substring> [--all-users] [--cert-name <name>]
 
 Options:
   --expected-subject <substring>   Required. Case-insensitive substring match against the cert subject.
-  --use-truststore <path>          Required. Path to the IT-published JKS that install wired into
-                                   JAVA_TOOL_OPTIONS (same value passed to the installer).
   --all-users                      Iterate /Users/* (UID >= 501). Requires root.
   --cert-name <name>               Accepted for cross-platform CLI parity with the Linux validator.
-                                   Ignored here: macOS matches by subject substring.
+                                   Ignored here: macOS matches by subject substring, and the JKS path /
+                                   .zshrc export are fixed regardless of cert-name.
   -h, --help                       Show this help
 
 Exits 0 if all checks pass, 1 if any check fails.
 EOF
-}
-
-canonicalize_path() {
-    local path="$1"
-    local dir base
-    if command -v realpath >/dev/null 2>&1; then
-        realpath "$path"
-        return 0
-    fi
-    dir="$(cd "$(dirname "$path")" && pwd)"
-    base="$(basename "$path")"
-    echo "${dir}/${base}"
 }
 
 parse_args() {
@@ -71,10 +57,6 @@ parse_args() {
                 ;;
             --expected-subject)
                 EXPECTED_SUBJECT="${2:?Error: --expected-subject requires a value}"
-                shift 2
-                ;;
-            --use-truststore)
-                USE_TRUSTSTORE="${2:?Error: --use-truststore requires a value}"
                 shift 2
                 ;;
             --cert-name)
@@ -103,22 +85,9 @@ parse_args() {
         exit 1
     fi
 
-    if [[ -z "$USE_TRUSTSTORE" ]]; then
-        echo "Error: --use-truststore is required." >&2
-        usage >&2
-        exit 1
-    fi
-
-    if [[ ! -f "$USE_TRUSTSTORE" ]]; then
-        echo "Error: truststore file not found: $USE_TRUSTSTORE" >&2
-        exit 1
-    fi
-
-    USE_TRUSTSTORE="$(canonicalize_path "$USE_TRUSTSTORE")"
-
     if [[ "$ALL_USERS" -eq 1 && "$(id -u)" -ne 0 ]]; then
         echo "Error: --all-users requires root (other users' homes are typically 0700)." >&2
-        echo "Use: sudo $0 --all-users --expected-subject ... --use-truststore ..." >&2
+        echo "Use: sudo $0 --all-users --expected-subject ..." >&2
         exit 1
     fi
 }
@@ -180,7 +149,7 @@ iter_all_users() {
 
 validate_keystore_contains_subject() {
     local keystore="$1" storepass="$2" label="$3"
-    if ! file_exists "$keystore"; then
+    if [[ ! -f "$keystore" ]]; then
         fail "$label keystore does not exist: $keystore"
         return 1
     fi
@@ -190,16 +159,9 @@ validate_keystore_contains_subject() {
         return 1
     fi
 
-    # Capture keytool output explicitly. Reading another user's keystore under
-    # --all-users requires sudo; the single-user case reads as the current user.
     local keytool_output rc
-    if [[ "$ALL_USERS" -eq 1 ]]; then
-        keytool_output="$(sudo keytool -list -v -keystore "$keystore" -storepass "$storepass" 2>&1)"
-        rc=$?
-    else
-        keytool_output="$(keytool -list -v -keystore "$keystore" -storepass "$storepass" 2>&1)"
-        rc=$?
-    fi
+    keytool_output="$(keytool -list -v -keystore "$keystore" -storepass "$storepass" 2>&1)"
+    rc=$?
     if [[ "$rc" -ne 0 ]]; then
         fail "$label: keytool could not read the keystore. Output (first 3 lines):"
         printf '%s\n' "$keytool_output" | head -n3 | sed 's/^/        /'
@@ -283,7 +245,7 @@ validate_for_user() {
     local zshrc="${home}/.zshrc"
 
     echo "Checking user $user (uid=$uid)..."
-    validate_zshrc_jto "$zshrc" "$USE_TRUSTSTORE" "$user" || true
+    validate_zshrc_jto "$zshrc" "$JKS_PATH" "$user" || true
 }
 
 main() {
@@ -291,11 +253,10 @@ main() {
     check_os
 
     echo "Expected subject (case-insensitive substring): $EXPECTED_SUBJECT"
-    echo "Truststore path: $USE_TRUSTSTORE"
     echo
 
-    # Truststore content is shared (IT-published); check once, then per-user JTO.
-    validate_keystore_contains_subject "$USE_TRUSTSTORE" "$JKS_PASSWORD" "Truststore $USE_TRUSTSTORE" || true
+    # System JKS is shared; check once, then per-user JTO in ~/.zshrc.
+    validate_keystore_contains_subject "$JKS_PATH" "$JKS_PASSWORD" "Truststore $JKS_PATH" || true
 
     if [[ "$ALL_USERS" -eq 1 ]]; then
         local iter_count=0 user home

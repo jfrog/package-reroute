@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Wire an IT-published JVM truststore on Linux for JVM clients (Maven, Gradle,
-# sbt, Apache Ivy).
+# Download a JVM truststore and wire it on Linux for JVM clients (Maven,
+# Gradle, sbt, Apache Ivy).
 #
-# Single path: take a supplied JKS truststore path and set JAVA_TOOL_OPTIONS
-# in /etc/environment so every new JVM startup inherits that trustStore path.
-# The supplied path is the runtime location — this script does not copy the
-# file (IT publishes the ready JKS to a durable path of its choosing).
+# Single path: download a JKS from --truststore-url into
+#   /etc/ssl/package-route-jvm/truststore.jks
+# then set JAVA_TOOL_OPTIONS in /etc/environment so every new JVM startup
+# inherits the trustStore path.
 #
 # Run:
-#   sudo bash install_certs_jvm_linux.sh --use-truststore /path/to/truststore.jks
+#   sudo bash install_certs_jvm_linux.sh --truststore-url https://example/truststore.jks
 #
 # Notes:
 #   - Linux only.
 #   - Must run as root.
+#   - Requires curl.
 #   - JVM trust only — does not configure npm/Python/HF and does not touch
 #     Docker credentials. Pair with install_certs_debian_ubuntu.sh if needed.
 #   - GUI-launched IDEs need a logoff/login to pick up /etc/environment.
@@ -24,55 +25,44 @@ set -euo pipefail
 
 # Keep this installer self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
+JKS_DIR="/etc/ssl/package-route-jvm"
+JKS_PATH="${JKS_DIR}/truststore.jks"
 JKS_PASSWORD="changeit"
 ENVIRONMENT_FILE="/etc/environment"
 
-USE_TRUSTSTORE=""
+TRUSTSTORE_URL=""
 RC_UPDATED=0
 
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-truststore <path>
+  sudo $0 --truststore-url <url>
 
 Options:
-  --use-truststore <path>  Absolute or relative path to the IT-published JVM
-                           truststore (JKS/PKCS12-compatible). JAVA_TOOL_OPTIONS
-                           will point at this path (resolved to absolute). The
-                           truststore must be readable by JVMs with password
-                           '${JKS_PASSWORD}'.
-  -h, --help               Show this help.
+  --truststore-url <url>  Download the JVM truststore (JKS/PKCS12-compatible)
+                          from this URL into ${JKS_PATH}, then wire
+                          JAVA_TOOL_OPTIONS to that path. The truststore must
+                          be readable by JVMs with password '${JKS_PASSWORD}'.
+  -h, --help              Show this help.
 
 Examples:
-  sudo $0 --use-truststore /usr/local/share/package-route-truststore.jks
+  sudo $0 --truststore-url https://artifacts.example.com/package-route-truststore.jks
 EOF
 }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-truststore <path>" >&2
+        echo "Use: sudo $0 --truststore-url <url>" >&2
         exit 1
     fi
-}
-
-canonicalize_path() {
-    local path="$1"
-    local dir base
-    if command -v realpath >/dev/null 2>&1; then
-        realpath "$path"
-        return 0
-    fi
-    dir="$(cd "$(dirname "$path")" && pwd)"
-    base="$(basename "$path")"
-    echo "${dir}/${base}"
 }
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --use-truststore)
-                USE_TRUSTSTORE="${2:?Error: --use-truststore requires a value}"
+            --truststore-url)
+                TRUSTSTORE_URL="${2:?Error: --truststore-url requires a value}"
                 shift 2
                 ;;
             -h|--help)
@@ -87,25 +77,11 @@ parse_args() {
         esac
     done
 
-    if [[ -z "$USE_TRUSTSTORE" ]]; then
-        echo "Error: --use-truststore is required." >&2
+    if [[ -z "$TRUSTSTORE_URL" ]]; then
+        echo "Error: --truststore-url is required." >&2
         usage >&2
         exit 1
     fi
-    if [[ ! -f "$USE_TRUSTSTORE" ]]; then
-        echo "Error: truststore file not found: $USE_TRUSTSTORE" >&2
-        exit 1
-    fi
-    if [[ ! -r "$USE_TRUSTSTORE" ]]; then
-        echo "Error: truststore file is not readable: $USE_TRUSTSTORE" >&2
-        exit 1
-    fi
-    if [[ ! -s "$USE_TRUSTSTORE" ]]; then
-        echo "Error: truststore file is empty: $USE_TRUSTSTORE" >&2
-        exit 1
-    fi
-
-    USE_TRUSTSTORE="$(canonicalize_path "$USE_TRUSTSTORE")"
 }
 
 check_os() {
@@ -113,6 +89,33 @@ check_os() {
         echo "Error: this script supports Linux only." >&2
         exit 1
     fi
+}
+
+download_truststore() {
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Error: curl is required to download the truststore." >&2
+        exit 1
+    fi
+
+    echo "[1/4] Downloading truststore from $TRUSTSTORE_URL..."
+    mkdir -p "$JKS_DIR"
+    chmod 0755 "$JKS_DIR"
+
+    local tmp
+    tmp="$(mktemp -p "$JKS_DIR")"
+    if ! curl -fsSL --connect-timeout 30 --max-time 120 -o "$tmp" "$TRUSTSTORE_URL"; then
+        rm -f "$tmp"
+        echo "Error: failed to download truststore from $TRUSTSTORE_URL" >&2
+        exit 1
+    fi
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        echo "Error: downloaded truststore is empty: $TRUSTSTORE_URL" >&2
+        exit 1
+    fi
+
+    mv "$tmp" "$JKS_PATH"
+    chmod 0644 "$JKS_PATH"
 }
 
 replace_export_in_file() {
@@ -252,18 +255,20 @@ main() {
     parse_args "$@"
     check_os
 
-    local jto_value="-Djavax.net.ssl.trustStore=\"${USE_TRUSTSTORE}\" -Djavax.net.ssl.trustStorePassword=\"${JKS_PASSWORD}\""
+    download_truststore
 
-    echo "[1/3] Writing JAVA_TOOL_OPTIONS to $ENVIRONMENT_FILE..."
+    local jto_value="-Djavax.net.ssl.trustStore=\"${JKS_PATH}\" -Djavax.net.ssl.trustStorePassword=\"${JKS_PASSWORD}\""
+
+    echo "[2/4] Writing JAVA_TOOL_OPTIONS to $ENVIRONMENT_FILE..."
     ensure_kv_in_environment_file "JAVA_TOOL_OPTIONS" "$jto_value"
 
-    echo "[2/3] Updating target user's shell rc file..."
+    echo "[3/4] Updating target user's shell rc file..."
     update_user_shell_rc "$jto_value"
 
-    echo "[3/3] Done."
+    echo "[4/4] Done."
     echo
     echo "Truststore:"
-    echo "  $USE_TRUSTSTORE"
+    echo "  $JKS_PATH"
     echo "JAVA_TOOL_OPTIONS:"
     echo "  $jto_value"
     echo

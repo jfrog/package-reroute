@@ -2,15 +2,14 @@
 # Validate JVM truststore installation done by install_certs_jvm_windows.ps1.
 #
 # Asserts:
-#   1. JKS file exists at the path given by -UseTruststore
+#   1. JKS file exists at %LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks
 #   2. JKS contains a cert whose subject (Owner: in keytool -list -v) matches
 #      -ExpectedSubject (case-insensitive substring).
-#   3. User-scope JAVA_TOOL_OPTIONS env var returns a value referencing that
-#      JKS path.
+#   3. User-scope JAVA_TOOL_OPTIONS env var returns a value referencing the
+#      expected JKS path.
 #
 # Run:
-#   powershell -ExecutionPolicy Bypass -File validate_certs_jvm_windows.ps1 `
-#     -ExpectedSubject "O=Zscaler" -UseTruststore C:\path\to\truststore.jks
+#   powershell -ExecutionPolicy Bypass -File validate_certs_jvm_windows.ps1 -ExpectedSubject "O=Zscaler"
 #
 # Exits 0 if all checks pass, 1 if any check fails. Result line is qualified
 # with a count of any non-fatal warnings.
@@ -27,11 +26,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ExpectedSubject,
 
-    [Parameter(Mandatory = $true)]
-    [string]$UseTruststore,
-
     # Accepted for cross-platform CLI parity with the Linux validator. Ignored
-    # here: Windows matches by subject substring. A fleet wrapper that passes
+    # here: Windows matches by subject substring, and the JKS path / HKCU env
+    # var name are fixed regardless of cert-name. A fleet wrapper that passes
     # -CertName to all three validators must not fail on Windows.
     [Parameter(Mandatory = $false)]
     [string]$CertName
@@ -41,8 +38,14 @@ $ErrorActionPreference = 'Stop'
 
 # Keep this validator self-contained: it is often copied/run as a standalone
 # script during onboarding, so avoid requiring sibling files for constants.
+$JvmWindowsJksRelativeDir = 'JFrog\package-route-jvm'
+$JvmWindowsJksBasename = 'truststore.jks'
 $JvmWindowsJksPassword = 'changeit'
 $JvmWindowsEnvVarName = 'JAVA_TOOL_OPTIONS'
+
+function Get-JvmWindowsJksPath {
+    Join-Path $env:LOCALAPPDATA (Join-Path $JvmWindowsJksRelativeDir $JvmWindowsJksBasename)
+}
 
 $script:FailCount = 0
 $script:WarnCount = 0
@@ -117,9 +120,9 @@ function Test-KeystoreContainsSubject {
         return
     }
     # I8 cross-platform parity (see validate_certs_jvm_linux.sh): refuse to
-    # validate stores that contain key material. The installer only wires a
-    # truststore of trustedCertEntry records, so any PrivateKeyEntry here
-    # indicates drift -- likely a hand-edited store. The well-known
+    # validate stores that contain key material. The installer only writes
+    # trustedCertEntry records, so any PrivateKeyEntry here indicates drift
+    # -- likely a future installer change or hand-edited store. The well-known
     # `changeit` password is unsuitable for actual private-key protection.
     if ($output | Where-Object { $_ -match '^Entry type: PrivateKeyEntry' }) {
         Write-Fail "$Label contains a PrivateKeyEntry -- this truststore must hold only trustedCertEntry records."
@@ -160,16 +163,10 @@ function Test-UserEnvVar {
 }
 
 function Main {
-    if (-not (Test-Path -LiteralPath $UseTruststore -PathType Leaf)) {
-        Write-Host "Error: truststore file not found: $UseTruststore"
-        exit 1
-    }
-    $jksPath = (Resolve-Path -LiteralPath $UseTruststore).Path
-
     Write-Host ("Expected subject (case-insensitive substring): {0}" -f $ExpectedSubject)
-    Write-Host ("Truststore path: {0}" -f $jksPath)
     Write-Host ""
 
+    $jksPath = Get-JvmWindowsJksPath
     Test-KeystoreContainsSubject -Keystore $jksPath -Password $JvmWindowsJksPassword -Label ("Truststore {0}" -f $jksPath)
     Test-UserEnvVar -JksPath $jksPath
 
