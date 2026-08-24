@@ -335,8 +335,10 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 Single path on macOS — there is no OS-trust fallback because macOS-specific `KeychainStore` is broken per [JDK-8321045](https://bugs.openjdk.org/browse/JDK-8321045). The script:
 
-1. Expands `--use-pkg` with `pkgutil --expand-full` and copies `truststore.jks` (or a unique `*.jks` / `*.p12`) into `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
+1. If `--use-pkg` is given, expands it with `pkgutil --expand-full` and copies `truststore.jks` into `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`. If Jamf already installed that package, the file is already there and `--use-pkg` can be omitted.
 2. Writes or updates `export JAVA_TOOL_OPTIONS=…` in the target user's `~/.zshrc` so JVMs use that fixed path.
+
+Jamf always invokes policy scripts as `script / <computerName> <user> …`. The installer ignores that prefix so a leading `/` is not treated as an option.
 
 Terminal and IntelliJ sessions that inherit a shell environment with that export pick up the truststore. Open a new terminal (or `source ~/.zshrc`) after install; restart the IDE if it was already running.
 
@@ -351,7 +353,7 @@ Terminal and IntelliJ sessions that inherit a shell environment with that export
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--use-pkg <path.pkg>` | **Yes** | Path to a component `.pkg` whose payload contains the JVM truststore. Prefer basename `truststore.jks`; otherwise a single `*.jks` / `*.p12`. Extracted into the fixed system path, then referenced by `JAVA_TOOL_OPTIONS`. Must be readable by JVMs with password `changeit`. |
+| `--use-pkg <path.pkg>` | No (required only if the JKS is not already installed) | Path to a component `.pkg` whose payload contains the JVM truststore. Prefer basename `truststore.jks`; otherwise a single `*.jks` / `*.p12`. Extracted into the fixed system path, then referenced by `JAVA_TOOL_OPTIONS`. Must be readable by JVMs with password `changeit`. |
 | `--all-users` | No | Iterate `/Users/*` and write the `~/.zshrc` export for every account with UID ≥ 501. Default = only `SUDO_USER` (or the GUI console user under JAMF). |
 | `-h`, `--help` | — | Usage. |
 

@@ -286,10 +286,32 @@ echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4. negative: missing --use-pkg rejected ==="
+echo "=== 4. negative: missing --use-pkg rejected when JKS is not installed ==="
 if install_as_test_user; then
     dump_last_log
-    fail_msg "installer should have rejected missing --use-pkg"
+    fail_msg "installer should have rejected missing --use-pkg when JKS is absent"
+fi
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 4b. Jamf prefix args (\$1=/) + --use-pkg succeeds ==="
+cleanup
+if ! install_as_test_user / "jamf-test-mac" "$TEST_USER" --use-pkg "$BUNDLE_PKG"; then
+    dump_last_log
+    fail_msg "Jamf-style invocation with / computer user --use-pkg should succeed"
+fi
+validate_as_test_user --expected-subject "Lab JVM mac CA Test" || { dump_last_log; fail_msg "validate after Jamf-style install failed"; }
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 4c. Jamf prefix with no --use-pkg uses already-installed JKS ==="
+# Leave the JKS from 4b in place; Jamf policies install the pkg then run the
+# script with only \$1=/ \$2=computer \$3=user.
+if ! install_as_test_user / "jamf-test-mac" "$TEST_USER"; then
+    dump_last_log
+    fail_msg "Jamf-style invocation without --use-pkg should succeed when JKS is already installed"
 fi
 echo "  ok"
 

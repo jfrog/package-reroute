@@ -9,9 +9,13 @@
 # startup inherits that trustStore path. KeychainStore is broken per
 # JDK-8321045, so there is no OS-trust fallback.
 #
-# Run:
+# Run (manual):
 #   sudo bash install_certs_jvm_macos.sh --use-pkg /path/to/truststore.pkg
 #       [--all-users]
+#
+# Jamf policy: install the truststore .pkg first (payload lands at JKS_PATH),
+# then run this script. Jamf always prepends $1=/ $2=computer $3=user — those
+# are ignored. --use-pkg is optional when the JKS is already on disk.
 #
 # Notes:
 #   - macOS only.
@@ -45,16 +49,17 @@ ALL_USERS=0
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-pkg <path.pkg> [--all-users]
+  sudo $0 [--use-pkg <path.pkg>] [--all-users]
 
 Options:
   --use-pkg <path.pkg>   Path to a macOS installer package whose payload
                          contains the JVM truststore (prefer basename
                          truststore.jks; otherwise a single *.jks / *.p12).
                          The JKS is extracted into ${JKS_PATH}, then
-                         JAVA_TOOL_OPTIONS is wired to that path. The
-                         truststore must be readable by JVMs with password
-                         '${JKS_PASSWORD}'.
+                         JAVA_TOOL_OPTIONS is wired to that path. Optional
+                         when Jamf has already installed the .pkg so
+                         ${JKS_PATH} exists. The truststore must be readable
+                         by JVMs with password '${JKS_PASSWORD}'.
   --all-users            Iterate /Users/* (UID >= 501, skip Shared) and write
                          the ~/.zshrc export for every account. Default =
                          only SUDO_USER (or the console-user under JAMF).
@@ -74,12 +79,24 @@ EOF
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-pkg <path.pkg> [--all-users]" >&2
+        echo "Use: sudo $0 [--use-pkg <path.pkg>] [--all-users]" >&2
         exit 1
     fi
 }
 
 parse_args() {
+    # Jamf policy scripts always receive:
+    #   $1 = target volume mount point (almost always /)
+    #   $2 = computer name
+    #   $3 = currently logged-in user (may be empty)
+    # Custom parameters start at $4. Drop the Jamf prefix so a bare "/" is
+    # not treated as an unknown option (that is what failed Customer0-jfproxy-mvn).
+    if [[ "${1:-}" == "/" ]]; then
+        shift || true
+        [[ $# -gt 0 ]] && shift || true
+        [[ $# -gt 0 ]] && shift || true
+    fi
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --use-pkg)
@@ -94,6 +111,16 @@ parse_args() {
                 usage
                 exit 0
                 ;;
+            *.pkg)
+                if [[ -z "$USE_PKG" ]]; then
+                    USE_PKG="$1"
+                    shift
+                else
+                    echo "Unknown option: $1" >&2
+                    usage >&2
+                    exit 1
+                fi
+                ;;
             *)
                 echo "Unknown option: $1" >&2
                 usage >&2
@@ -102,24 +129,31 @@ parse_args() {
         esac
     done
 
-    if [[ -z "$USE_PKG" ]]; then
-        echo "Error: --use-pkg is required." >&2
-        usage >&2
-        exit 1
+    if [[ -n "$USE_PKG" ]]; then
+        if [[ ! -f "$USE_PKG" ]]; then
+            echo "Error: package file not found: $USE_PKG" >&2
+            exit 1
+        fi
+        if [[ ! -r "$USE_PKG" ]]; then
+            echo "Error: package file is not readable: $USE_PKG" >&2
+            exit 1
+        fi
+        if [[ ! -s "$USE_PKG" ]]; then
+            echo "Error: package file is empty: $USE_PKG" >&2
+            exit 1
+        fi
+        return 0
     fi
 
-    if [[ ! -f "$USE_PKG" ]]; then
-        echo "Error: package file not found: $USE_PKG" >&2
-        exit 1
+    # Jamf already installed the truststore package into the payload path.
+    if [[ -s "$JKS_PATH" ]]; then
+        return 0
     fi
-    if [[ ! -r "$USE_PKG" ]]; then
-        echo "Error: package file is not readable: $USE_PKG" >&2
-        exit 1
-    fi
-    if [[ ! -s "$USE_PKG" ]]; then
-        echo "Error: package file is empty: $USE_PKG" >&2
-        exit 1
-    fi
+
+    echo "Error: --use-pkg is required unless the truststore already exists at:" >&2
+    echo "       $JKS_PATH" >&2
+    usage >&2
+    exit 1
 }
 
 check_os() {
@@ -345,7 +379,11 @@ main() {
     check_os
 
     echo
-    extract_truststore_from_pkg
+    if [[ -n "$USE_PKG" ]]; then
+        extract_truststore_from_pkg
+    else
+        echo "  [JKS] Using already-installed truststore at $JKS_PATH"
+    fi
 
     if [[ "$ALL_USERS" -eq 1 ]]; then
         local iter_count=0 user home
