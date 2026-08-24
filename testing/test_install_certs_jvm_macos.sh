@@ -15,7 +15,8 @@
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
 #   3. Idempotent re-install (copied JKS checksum stable; .zshrc export replaced)
-#   4. Missing --use-pkg is rejected
+#   4. Missing --use-pkg is rejected; Jamf's positional prefix ($1=/ $2=computer
+#      $3=user) and its blank script parameters 4-11 are ignored
 #   5. Missing pkg path / pkg with no JKS are rejected
 #   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS
 #   7. --all-users iterates /Users/* and installs into every eligible account
@@ -312,6 +313,23 @@ echo "=== 4c. Jamf prefix with no --use-pkg uses already-installed JKS ==="
 if ! install_as_test_user / "jamf-test-mac" "$TEST_USER"; then
     dump_last_log
     fail_msg "Jamf-style invocation without --use-pkg should succeed when JKS is already installed"
+fi
+echo "  ok"
+
+#-----------------------------------------------------------------------------
+echo
+echo "=== 4d. Jamf blank script parameters 4-11 are ignored ==="
+# Jamf hands every unset script parameter to the script as an empty string, so
+# the parser must skip them instead of reporting "Unknown option: ".
+cleanup
+if ! install_as_test_user / "jamf-test-mac" "$TEST_USER" --use-pkg "$BUNDLE_PKG" "" "" "" "" "" "" ""; then
+    dump_last_log
+    fail_msg "Jamf-style invocation with blank trailing parameters should succeed"
+fi
+validate_as_test_user --expected-subject "Lab JVM mac CA Test" || { dump_last_log; fail_msg "validate after blank-parameter install failed"; }
+if ! install_as_test_user / "jamf-test-mac" "" "" "" "" "" "" "" "" ""; then
+    dump_last_log
+    fail_msg "Jamf-style invocation with an empty user and blank parameters should succeed"
 fi
 echo "  ok"
 

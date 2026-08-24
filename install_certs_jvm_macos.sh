@@ -99,6 +99,11 @@ parse_args() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            "")
+                # Jamf passes script parameters 4-11 as empty strings whenever
+                # the policy leaves them blank.
+                shift
+                ;;
             --use-pkg)
                 USE_PKG="${2:?Error: --use-pkg requires a value}"
                 shift 2
