@@ -45,32 +45,12 @@ build_bundle_truststore() {
         -storepass changeit >/dev/null
 }
 
-start_http_server() {
-    command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1 \
-        || fail "python3 required to serve truststore fixture over HTTP"
-    local py
-    py="$(command -v python3 || command -v python)"
-    HTTP_DIR="$(mktemp -d /tmp/jvm-linux-http.XXXXXX)"
-    cp /tmp/bundled-truststore.jks "$HTTP_DIR/bundled-truststore.jks"
-    : > "$HTTP_DIR/empty-truststore.jks"
-    local port
-    port="$("$py" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-    "$py" -m http.server "$port" --bind 127.0.0.1 --directory "$HTTP_DIR" >/dev/null 2>&1 &
-    HTTP_PID=$!
-    sleep 0.3
-    kill -0 "$HTTP_PID" 2>/dev/null || fail "local HTTP server failed to start"
-    TRUSTSTORE_URL="http://127.0.0.1:${port}/bundled-truststore.jks"
-    EMPTY_URL="http://127.0.0.1:${port}/empty-truststore.jks"
-    trap 'kill "$HTTP_PID" 2>/dev/null || true; rm -rf "$HTTP_DIR"' EXIT
-}
-
 run_generic() {
-    command -v curl >/dev/null 2>&1 || fail "curl is required by install_certs_jvm_linux.sh"
     build_bundle_truststore
-    start_http_server
+    local bundle=/tmp/bundled-truststore.jks
 
     echo "=== generic: positive install + validate ==="
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --truststore-url "$TRUSTSTORE_URL" >/dev/null
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
     ./validate_certs_jvm_linux.sh --expected-subject "Lab JVM CA Final" >/dev/null
     echo "  ok"
 
@@ -81,8 +61,8 @@ run_generic() {
     echo "  ok"
 
     echo "=== generic: idempotent re-install preserves bundled JKS ==="
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --truststore-url "$TRUSTSTORE_URL" >/dev/null
-    bundle_sha="$(sha256sum /tmp/bundled-truststore.jks | awk '{print $1}')"
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
+    bundle_sha="$(sha256sum "$bundle" | awk '{print $1}')"
     installed_sha="$(sha256sum /etc/ssl/package-route-jvm/truststore.jks | awk '{print $1}')"
     [[ "$installed_sha" == "$bundle_sha" ]] || fail "installed JKS checksum differs from bundle"
     env_lines="$(grep -c '^JAVA_TOOL_OPTIONS=' /etc/environment 2>/dev/null || true)"
@@ -96,24 +76,22 @@ run_generic() {
     echo "=== generic: JTO env var REPLACES (not appends) on re-install ==="
     sed -i '/^JAVA_TOOL_OPTIONS=/d' /etc/environment
     echo 'JAVA_TOOL_OPTIONS="-Dpackage-reroute-test-sentinel=must-be-replaced"' >> /etc/environment
-    SUDO_USER=devx ./install_certs_jvm_linux.sh --truststore-url "$TRUSTSTORE_URL" >/dev/null
+    SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore "$bundle" >/dev/null
     if grep -q 'package-reroute-test-sentinel' /etc/environment; then
         fail "JTO env var was APPENDED to (sentinel survived). Re-install must replace."
     fi
     echo "  ok"
 
-    echo "=== generic: missing --truststore-url rejected ==="
+    echo "=== generic: missing and empty truststores rejected ==="
     if SUDO_USER=devx ./install_certs_jvm_linux.sh >/dev/null 2>&1; then
-        fail "installer should have rejected missing --truststore-url"
+        fail "installer should have rejected missing --use-truststore"
     fi
-    echo "  ok"
-
-    echo "=== generic: bad URL and empty download rejected ==="
-    if SUDO_USER=devx ./install_certs_jvm_linux.sh --truststore-url "http://127.0.0.1:9/no-such-truststore.jks" >/dev/null 2>&1; then
-        fail "installer should have rejected bad truststore URL"
+    if SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore /tmp/no-such-truststore.jks >/dev/null 2>&1; then
+        fail "installer should have rejected missing truststore"
     fi
-    if SUDO_USER=devx ./install_certs_jvm_linux.sh --truststore-url "$EMPTY_URL" >/dev/null 2>&1; then
-        fail "installer should have rejected empty truststore download"
+    : > /tmp/empty-truststore.jks
+    if SUDO_USER=devx ./install_certs_jvm_linux.sh --use-truststore /tmp/empty-truststore.jks >/dev/null 2>&1; then
+        fail "installer should have rejected empty truststore"
     fi
     echo "  ok"
 
@@ -194,9 +172,9 @@ chmod +x "$PROBE"
 
 # distro_id|mode|image|setup_command
 MATRIX=(
-    "ubuntu|generic|ubuntu:22.04|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates curl default-jdk-headless python3 >/dev/null"
-    "debian|generic|debian:12|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates curl default-jdk-headless python3 >/dev/null"
-    "amazonlinux|generic|amazonlinux:2023|dnf install -y -q java-21-amazon-corretto-headless openssl shadow-utils ca-certificates curl python3 >/dev/null"
+    "ubuntu|generic|ubuntu:22.04|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates default-jdk-headless >/dev/null"
+    "debian|generic|debian:12|export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends openssl ca-certificates default-jdk-headless >/dev/null"
+    "amazonlinux|generic|amazonlinux:2023|dnf install -y -q java-21-amazon-corretto-headless openssl shadow-utils ca-certificates >/dev/null"
     "rhel|rhel|redhat/ubi9:latest|dnf install -y -q java-21-openjdk-headless openssl shadow-utils >/dev/null"
 )
 

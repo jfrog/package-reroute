@@ -8,15 +8,15 @@
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
 # fresh-state cases and via `trap EXIT`. The test runner builds a keychain-only
 # JKS via build_jvm_truststore_macos.sh, then imports a lab CA into that fixture
-# so --expected-subject stays deterministic. The installer downloads the fixture
-# from a local HTTP URL into the system JKS path and wires ~/.zshrc.
+# so --expected-subject stays deterministic. The installer extracts the JKS
+# from a component .pkg into the system path and wires ~/.zshrc.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
 #   3. Idempotent re-install (copied JKS checksum stable; .zshrc export replaced)
-#   4. Missing --truststore-url is rejected
-#   5. Bad URL (404) / empty download are rejected
+#   4. Missing --use-pkg is rejected
+#   5. Missing pkg path / pkg with no JKS are rejected
 #   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS
 #   7. --all-users iterates /Users/* and installs into every eligible account
 #      (covers the iter_all_users filter + per-user chown contract)
@@ -54,11 +54,9 @@ JKS_DIR="/Library/Application Support/JFrog/package-route-jvm"
 JKS="${JKS_DIR}/truststore.jks"
 ZSHRC="${TEST_HOME}/.zshrc"
 BUNDLE_JKS="/tmp/jvm-mac-bundled-truststore.jks"
+BUNDLE_PKG="/tmp/jvm-mac-truststore.pkg"
+NO_JKS_PKG="/tmp/jvm-mac-no-jks.pkg"
 ZSHRC_BACKUP=""
-HTTP_DIR=""
-HTTP_PID=""
-TRUSTSTORE_URL=""
-EMPTY_URL=""
 
 echo "Test user: $TEST_USER (uid=$TEST_UID, home=$TEST_HOME)"
 
@@ -106,18 +104,6 @@ strip_jto_from_zshrc() {
     fi
 }
 
-stop_http_server() {
-    if [[ -n "$HTTP_PID" ]]; then
-        kill "$HTTP_PID" 2>/dev/null || true
-        wait "$HTTP_PID" 2>/dev/null || true
-        HTTP_PID=""
-    fi
-    if [[ -n "$HTTP_DIR" && -d "$HTTP_DIR" ]]; then
-        rm -rf "$HTTP_DIR"
-        HTTP_DIR=""
-    fi
-}
-
 cleanup() {
     rm -rf "$JKS_DIR"
     strip_jto_from_zshrc
@@ -126,8 +112,7 @@ cleanup() {
 final_cleanup() {
     cleanup
     restore_zshrc
-    stop_http_server
-    rm -f "$BUNDLE_JKS"
+    rm -f "$BUNDLE_JKS" "$BUNDLE_PKG" "$NO_JKS_PKG"
 }
 backup_zshrc
 trap final_cleanup EXIT
@@ -165,21 +150,32 @@ build_bundle_truststore() {
     echo "Bundled truststore fixture: $BUNDLE_JKS"
 }
 
-start_http_server() {
-    command -v python3 >/dev/null 2>&1 || fail_msg "python3 required to serve truststore fixture over HTTP"
-    HTTP_DIR="$(mktemp -d /tmp/jvm-mac-http.XXXXXX)"
-    cp "$BUNDLE_JKS" "$HTTP_DIR/bundled-truststore.jks"
-    : > "$HTTP_DIR/empty-truststore.jks"
-    local port
-    port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-    python3 -m http.server "$port" --bind 127.0.0.1 --directory "$HTTP_DIR" >/dev/null 2>&1 &
-    HTTP_PID=$!
-    # Give the server a moment to bind.
-    sleep 0.3
-    kill -0 "$HTTP_PID" 2>/dev/null || fail_msg "local HTTP server failed to start"
-    TRUSTSTORE_URL="http://127.0.0.1:${port}/bundled-truststore.jks"
-    EMPTY_URL="http://127.0.0.1:${port}/empty-truststore.jks"
-    echo "Serving fixture at $TRUSTSTORE_URL"
+build_pkg_from_root() {
+    local out_pkg="$1" root="$2"
+    command -v pkgbuild >/dev/null 2>&1 || fail_msg "pkgbuild not on PATH (needed to build the Jamf-style fixture)"
+    rm -f "$out_pkg"
+    pkgbuild --root "$root" \
+        --identifier "com.jfrog.package-route.jvm-truststore.test" \
+        --version "1.0" \
+        "$out_pkg" >/dev/null
+}
+
+build_truststore_pkg() {
+    local root
+    root="$(mktemp -d /tmp/jvm-mac-pkg-root.XXXXXX)"
+    mkdir -p "$root/Library/Application Support/JFrog/package-route-jvm"
+    cp "$BUNDLE_JKS" "$root/Library/Application Support/JFrog/package-route-jvm/truststore.jks"
+    build_pkg_from_root "$BUNDLE_PKG" "$root"
+    rm -rf "$root"
+    echo "Truststore pkg fixture: $BUNDLE_PKG"
+}
+
+build_no_jks_pkg() {
+    local root
+    root="$(mktemp -d /tmp/jvm-mac-pkg-nojks.XXXXXX)"
+    echo "no truststore" > "$root/README.txt"
+    build_pkg_from_root "$NO_JKS_PKG" "$root"
+    rm -rf "$root"
 }
 
 # Generate the lab CA used by all positive cases.
@@ -190,7 +186,8 @@ start_http_server() {
 
 require_keytool
 build_bundle_truststore /tmp/jvm-mac-test-ca.pem
-start_http_server
+build_truststore_pkg
+build_no_jks_pkg
 
 # Capture combined stdout/stderr to a tempfile and only dump it on an
 # *unexpected* exit. Negative tests need silence on the expected-fail path
@@ -253,7 +250,7 @@ echo "=== 1. positive: install + validate ==="
 cleanup
 # Positive cases let stdout through so a CI failure shows a useful log; only
 # negative cases (where we *expect* exit 1) silence both streams.
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --truststore-url "$TRUSTSTORE_URL"
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG"
 SUDO_USER="$TEST_USER" ./validate_certs_jvm_macos.sh --expected-subject "Lab JVM mac CA Test"
 echo "  ok"
 
@@ -268,7 +265,7 @@ echo "  ok"
 #-----------------------------------------------------------------------------
 echo
 echo "=== 3. idempotency: 2nd install preserves bundled JKS / single .zshrc export ==="
-install_as_test_user --truststore-url "$TRUSTSTORE_URL"
+install_as_test_user --use-pkg "$BUNDLE_PKG"
 validate_as_test_user --expected-subject "Lab JVM mac CA Test"
 
 bundle_sha="$(shasum -a 256 "$BUNDLE_JKS" | awk '{print $1}')"
@@ -289,28 +286,28 @@ echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4. negative: missing --truststore-url rejected ==="
+echo "=== 4. negative: missing --use-pkg rejected ==="
 if install_as_test_user; then
     dump_last_log
-    fail_msg "installer should have rejected missing --truststore-url"
+    fail_msg "installer should have rejected missing --use-pkg"
 fi
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 5. negative: bad URL (404) rejected ==="
-if install_as_test_user --truststore-url "http://127.0.0.1:9/no-such-jvm-truststore.jks"; then
+echo "=== 5. negative: missing pkg path rejected ==="
+if install_as_test_user --use-pkg /tmp/no-such-jvm-truststore.pkg; then
     dump_last_log
-    fail_msg "installer should have rejected bad truststore URL"
+    fail_msg "installer should have rejected missing pkg path"
 fi
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 6. negative: empty download rejected ==="
-if install_as_test_user --truststore-url "$EMPTY_URL"; then
+echo "=== 6. negative: pkg with no JKS rejected ==="
+if install_as_test_user --use-pkg "$NO_JKS_PKG"; then
     dump_last_log
-    fail_msg "installer should have rejected empty truststore download"
+    fail_msg "installer should have rejected pkg with no JKS payload"
 fi
 echo "  ok"
 
@@ -318,7 +315,7 @@ echo "  ok"
 echo
 echo "=== 7. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS ==="
 cleanup
-install_as_test_user --truststore-url "$TRUSTSTORE_URL"
+install_as_test_user --use-pkg "$BUNDLE_PKG"
 jto="$(get_zshrc_jto)" || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
 case "$jto" in
     *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) echo "  ok" ;;
@@ -333,7 +330,7 @@ cleanup
 # verify iter_all_users does at least one iteration through the filter +
 # per-user-chown path; multi-user is covered by the local dev Mac smoke.
 # Run without SUDO_USER set so the installer takes the --all-users branch.
-out="$(./install_certs_jvm_macos.sh --truststore-url "$TRUSTSTORE_URL" --all-users 2>&1)"
+out="$(./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG" --all-users 2>&1)"
 echo "$out" | grep -q "=== User: ${TEST_USER}" \
     || { echo "$out" | tail -20; fail_msg "--all-users did not iterate ${TEST_USER}"; }
 echo "$out" | grep -qE "Installed for [0-9]+ user\(s\)" \
@@ -347,7 +344,7 @@ echo "  ok"
 #-----------------------------------------------------------------------------
 # Re-install once so the next three invariants observe the final end state.
 cleanup
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --truststore-url "$TRUSTSTORE_URL" >/dev/null
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG" >/dev/null
 
 echo
 echo "=== 9. JKS extends bundled public roots ==="

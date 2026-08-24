@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Download a JVM truststore and wire it on macOS for JVM clients (Maven,
-# Gradle, sbt, Apache Ivy).
+# Extract a JVM truststore from a Jamf-delivered macOS .pkg and wire it for
+# JVM clients (Maven, Gradle, sbt, Apache Ivy).
 #
-# Single path: download a JKS from --truststore-url into
+# Single path: expand --use-pkg, copy the JKS payload into
 #   /Library/Application Support/JFrog/package-route-jvm/truststore.jks
 # then set JAVA_TOOL_OPTIONS in the target user's ~/.zshrc so every new JVM
 # startup inherits that trustStore path. KeychainStore is broken per
 # JDK-8321045, so there is no OS-trust fallback.
 #
 # Run:
-#   sudo bash install_certs_jvm_macos.sh --truststore-url https://example/truststore.jks
+#   sudo bash install_certs_jvm_macos.sh --use-pkg /path/to/truststore.pkg
 #       [--all-users]
 #
 # Notes:
 #   - macOS only.
-#   - Must run as root (download into /Library + chown per-user ~/.zshrc).
-#   - Requires curl.
+#   - Must run as root (write into /Library + chown per-user ~/.zshrc).
+#   - Requires pkgutil (macOS built-in). The pkg payload must contain a
+#     non-empty truststore.jks (or a single *.jks / *.p12 file).
 #   - JVM trust only — does not configure npm/Python/HF and does not touch
 #     Docker credentials. Pair with install_certs_macos.sh if you need those.
 #   - Users need a new terminal (or `source ~/.zshrc`) for the env var to
 #     take effect.
 #
 # Cross-platform siblings (keep CLI shapes and contracts in sync):
-#   install_certs_jvm_linux.sh       — download + JAVA_TOOL_OPTIONS in /etc/environment
+#   install_certs_jvm_linux.sh       — local JKS + JAVA_TOOL_OPTIONS in /etc/environment
 #   install_certs_jvm_rhel.sh        — RHEL update-ca-trust
-#   install_certs_jvm_windows.ps1    — download + HKCU\Environment JAVA_TOOL_OPTIONS
+#   install_certs_jvm_windows.ps1    — local JKS + HKCU\Environment JAVA_TOOL_OPTIONS
 #
 # Research / rationale: see the JVM client-onboarding wiki page
 #   https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/
@@ -38,19 +39,22 @@ JKS_DIR="/Library/Application Support/JFrog/package-route-jvm"
 JKS_PATH="${JKS_DIR}/truststore.jks"
 JKS_PASSWORD="changeit"
 
-TRUSTSTORE_URL=""
+USE_PKG=""
 ALL_USERS=0
 
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --truststore-url <url> [--all-users]
+  sudo $0 --use-pkg <path.pkg> [--all-users]
 
 Options:
-  --truststore-url <url> Download the JVM truststore (JKS/PKCS12-compatible)
-                         from this URL into ${JKS_PATH}, then wire
-                         JAVA_TOOL_OPTIONS to that path. The truststore must
-                         be readable by JVMs with password '${JKS_PASSWORD}'.
+  --use-pkg <path.pkg>   Path to a macOS installer package whose payload
+                         contains the JVM truststore (prefer basename
+                         truststore.jks; otherwise a single *.jks / *.p12).
+                         The JKS is extracted into ${JKS_PATH}, then
+                         JAVA_TOOL_OPTIONS is wired to that path. The
+                         truststore must be readable by JVMs with password
+                         '${JKS_PASSWORD}'.
   --all-users            Iterate /Users/* (UID >= 501, skip Shared) and write
                          the ~/.zshrc export for every account. Default =
                          only SUDO_USER (or the console-user under JAMF).
@@ -62,15 +66,15 @@ KeychainStore truststoreType is broken (JDK-8321045) and no OS-trust
 fallback exists.
 
 Examples:
-  sudo $0 --truststore-url https://artifacts.example.com/package-route-truststore.jks
-  sudo $0 --truststore-url https://artifacts.example.com/package-route-truststore.jks --all-users
+  sudo $0 --use-pkg /Library/Application\\ Support/JFrog/package-route-truststore.pkg
+  sudo $0 --use-pkg /tmp/package-route-truststore.pkg --all-users
 EOF
 }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --truststore-url <url> [--all-users]" >&2
+        echo "Use: sudo $0 --use-pkg <path.pkg> [--all-users]" >&2
         exit 1
     fi
 }
@@ -78,8 +82,8 @@ require_root() {
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --truststore-url)
-                TRUSTSTORE_URL="${2:?Error: --truststore-url requires a value}"
+            --use-pkg)
+                USE_PKG="${2:?Error: --use-pkg requires a value}"
                 shift 2
                 ;;
             --all-users)
@@ -98,9 +102,22 @@ parse_args() {
         esac
     done
 
-    if [[ -z "$TRUSTSTORE_URL" ]]; then
-        echo "Error: --truststore-url is required." >&2
+    if [[ -z "$USE_PKG" ]]; then
+        echo "Error: --use-pkg is required." >&2
         usage >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$USE_PKG" ]]; then
+        echo "Error: package file not found: $USE_PKG" >&2
+        exit 1
+    fi
+    if [[ ! -r "$USE_PKG" ]]; then
+        echo "Error: package file is not readable: $USE_PKG" >&2
+        exit 1
+    fi
+    if [[ ! -s "$USE_PKG" ]]; then
+        echo "Error: package file is empty: $USE_PKG" >&2
         exit 1
     fi
 }
@@ -114,29 +131,55 @@ check_os() {
     fi
 }
 
-download_truststore() {
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "Error: curl is required to download the truststore." >&2
+# Expand a component or product .pkg and copy the truststore payload to JKS_PATH.
+extract_truststore_from_pkg() {
+    if ! command -v pkgutil >/dev/null 2>&1; then
+        echo "Error: pkgutil is required to extract the truststore from a .pkg." >&2
         exit 1
     fi
 
-    echo "  [JKS] Downloading truststore from $TRUSTSTORE_URL"
+    echo "  [JKS] Extracting truststore from $USE_PKG"
+
+    # pkgutil --expand-full creates dest-dir; it must not already exist.
+    local expand_dir
+    expand_dir="$(mktemp -d /tmp/package-route-jvm-pkg.XXXXXX)"
+    rmdir "$expand_dir"
+    if ! pkgutil --expand-full "$USE_PKG" "$expand_dir" >/dev/null; then
+        echo "Error: failed to expand package: $USE_PKG" >&2
+        exit 1
+    fi
+
+    local named=() matches=() f
+    while IFS= read -r -d '' f; do
+        [[ -s "$f" ]] || continue
+        matches+=("$f")
+        if [[ "$(basename "$f")" == "truststore.jks" ]]; then
+            named+=("$f")
+        fi
+    done < <(find "$expand_dir" -type f \( -name '*.jks' -o -name '*.p12' \) -print0 2>/dev/null)
+
+    local source=""
+    if [[ "${#named[@]}" -eq 1 ]]; then
+        source="${named[0]}"
+    elif [[ "${#named[@]}" -gt 1 ]]; then
+        rm -rf "$expand_dir"
+        echo "Error: package contains multiple truststore.jks files; expected exactly one." >&2
+        exit 1
+    elif [[ "${#matches[@]}" -eq 1 ]]; then
+        source="${matches[0]}"
+    elif [[ "${#matches[@]}" -eq 0 ]]; then
+        rm -rf "$expand_dir"
+        echo "Error: package contains no JKS/PKCS12 truststore (looked for truststore.jks, *.jks, *.p12): $USE_PKG" >&2
+        exit 1
+    else
+        rm -rf "$expand_dir"
+        echo "Error: package contains ${#matches[@]} JKS/PKCS12 files and no unique truststore.jks; expected one." >&2
+        exit 1
+    fi
+
     mkdir -p "$JKS_DIR"
-
-    local tmp
-    tmp="$(mktemp "${JKS_DIR}/truststore.XXXXXX")"
-    if ! curl -fsSL --connect-timeout 30 --max-time 120 -o "$tmp" "$TRUSTSTORE_URL"; then
-        rm -f "$tmp"
-        echo "Error: failed to download truststore from $TRUSTSTORE_URL" >&2
-        exit 1
-    fi
-    if [[ ! -s "$tmp" ]]; then
-        rm -f "$tmp"
-        echo "Error: downloaded truststore is empty: $TRUSTSTORE_URL" >&2
-        exit 1
-    fi
-
-    mv "$tmp" "$JKS_PATH"
+    cp "$source" "$JKS_PATH"
+    rm -rf "$expand_dir"
     chmod 0755 "$JKS_DIR"
     chmod 0644 "$JKS_PATH"
     echo "  [JKS] Installed at $JKS_PATH"
@@ -302,7 +345,7 @@ main() {
     check_os
 
     echo
-    download_truststore
+    extract_truststore_from_pkg
 
     if [[ "$ALL_USERS" -eq 1 ]]; then
         local iter_count=0 user home

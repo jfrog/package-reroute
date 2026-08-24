@@ -7,18 +7,18 @@
 # No Administrator required -- User-scope env vars are per-user. The runner
 # builds a LocalMachine\Root-only JKS via build_jvm_truststore_windows.ps1,
 # then imports a lab CA into that fixture so -ExpectedSubject stays
-# deterministic. The installer downloads the fixture from a local HTTP URL
-# into %LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks and wires
+# deterministic. The installer copies the fixture into
+# %LOCALAPPDATA%\JFrog\package-route-jvm\truststore.jks and wires
 # HKCU\Environment JAVA_TOOL_OPTIONS.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
 #   3. Idempotent re-install (env var replaced; installed JKS matches fixture)
-#   4. Bad URL (404) / empty download are rejected
+#   4. Missing / empty truststore paths are rejected
 #   5. User-scope JAVA_TOOL_OPTIONS references the installed JKS
 #   6. JTO env var REPLACES (not appends) on re-install
-#   7. Mandatory -TruststoreUrl: no-args invocation fails non-interactively
+#   7. Mandatory -UseTruststore: no-args invocation fails non-interactively
 #   8. Installed JKS preserves public roots from the bundled truststore
 #   9. Installed JKS contains a well-known public root (DigiCert family)
 
@@ -64,25 +64,6 @@ $JksPath   = Get-JvmWindowsJksPath
 $JksDir    = Split-Path -Parent $JksPath
 $LabSubj   = 'Lab JVM Win CA Test'
 $BundleJks = 'C:\Windows\Temp\jvm-win-bundled-truststore.jks'
-$HttpDir   = $null
-$HttpProc  = $null
-$TruststoreUrl = $null
-$EmptyUrl = $null
-
-function Stop-HttpServer {
-    if ($null -ne $script:HttpProc) {
-        try {
-            if (-not $script:HttpProc.HasExited) {
-                Stop-Process -Id $script:HttpProc.Id -Force -ErrorAction SilentlyContinue
-            }
-        } catch {}
-        $script:HttpProc = $null
-    }
-    if ($script:HttpDir -and (Test-Path -LiteralPath $script:HttpDir)) {
-        Remove-Item -LiteralPath $script:HttpDir -Recurse -Force -ErrorAction SilentlyContinue
-        $script:HttpDir = $null
-    }
-}
 
 function Cleanup {
     # Reset JAVA_TOOL_OPTIONS regardless of prior state. Setting to $null
@@ -100,7 +81,6 @@ function Cleanup {
 
 function Final-Cleanup {
     Cleanup
-    Stop-HttpServer
     Remove-Item -LiteralPath $BundleJks -ErrorAction SilentlyContinue
 }
 
@@ -222,46 +202,13 @@ function Build-BundledTruststore {
     Write-Host ("Bundled truststore fixture: {0}" -f $BundleJks)
 }
 
-function Start-HttpServer {
-    $python = $null
-    foreach ($name in @('python', 'python3', 'py')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd) { $python = $cmd.Source; break }
-    }
-    if (-not $python) {
-        Fail-Test 'python required to serve truststore fixture over HTTP'
-    }
-
-    $script:HttpDir = Join-Path $env:TEMP ("jvm-win-http-" + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $script:HttpDir | Out-Null
-    Copy-Item -LiteralPath $BundleJks -Destination (Join-Path $script:HttpDir 'bundled-truststore.jks') -Force
-    '' | Set-Content -LiteralPath (Join-Path $script:HttpDir 'empty-truststore.jks') -NoNewline
-
-    $tcp = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
-    $tcp.Start()
-    $port = $tcp.LocalEndpoint.Port
-    $tcp.Stop()
-
-    $script:HttpProc = Start-Process -FilePath $python `
-        -ArgumentList @('-m', 'http.server', "$port", '--bind', '127.0.0.1', '--directory', $script:HttpDir) `
-        -WindowStyle Hidden -PassThru
-    Start-Sleep -Milliseconds 400
-    if ($script:HttpProc.HasExited) {
-        Fail-Test 'local HTTP server failed to start'
-    }
-    $script:TruststoreUrl = "http://127.0.0.1:$port/bundled-truststore.jks"
-    $script:EmptyUrl = "http://127.0.0.1:$port/empty-truststore.jks"
-    Write-Host ("Serving fixture at {0}" -f $script:TruststoreUrl)
-}
-
 Build-BundledTruststore -CaPath $labCa
-Start-HttpServer
 
 #-----------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== 1. positive: install + validate ==="
 Cleanup
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $TruststoreUrl) | Out-Null
+Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj) | Out-Null
 Write-Host "  ok"
 
@@ -274,7 +221,7 @@ Write-Host "  ok"
 #-----------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== 3. idempotency: 2nd install preserves bundled JKS / single env value ==="
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $TruststoreUrl) | Out-Null
+Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 Invoke-Validator -ScriptArgs @('-ExpectedSubject', $LabSubj) | Out-Null
 
 $bundleHash = (Get-FileHash -LiteralPath $BundleJks -Algorithm SHA256).Hash
@@ -295,20 +242,21 @@ Write-Host ("  ok (alias_count={0})" -f $aliasCount)
 
 #-----------------------------------------------------------------------------
 Write-Host ""
-Write-Host "=== 4. negative: bad URL (404) rejected ==="
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', 'http://127.0.0.1:9/no-such-jvm-truststore.jks') -ExpectFail | Out-Null
+Write-Host "=== 4. negative: missing truststore path rejected ==="
+Invoke-Installer -ScriptArgs @('-UseTruststore', 'C:\Windows\Temp\no-such-jvm-truststore.jks') -ExpectFail | Out-Null
 Write-Host "  ok"
 
 Write-Host ""
-Write-Host "=== 5. negative: empty download rejected ==="
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $EmptyUrl) -ExpectFail | Out-Null
+Write-Host "=== 5. negative: empty truststore rejected ==="
+'' | Set-Content -LiteralPath 'C:\Windows\Temp\jvm-win-empty-truststore.jks' -NoNewline
+Invoke-Installer -ScriptArgs @('-UseTruststore', 'C:\Windows\Temp\jvm-win-empty-truststore.jks') -ExpectFail | Out-Null
 Write-Host "  ok"
 
 #-----------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== 6. User-scope JAVA_TOOL_OPTIONS references the installed JKS ==="
 Cleanup
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $TruststoreUrl) | Out-Null
+Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 $jto = [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', [EnvironmentVariableTarget]::User)
 if (-not $jto) {
     Fail-Test 'User-scope JAVA_TOOL_OPTIONS not set'
@@ -322,7 +270,7 @@ Write-Host "  ok"
 Write-Host ""
 Write-Host "=== 7. JTO env var REPLACES (not appends) on re-install ==="
 [Environment]::SetEnvironmentVariable('JAVA_TOOL_OPTIONS', '-Dpackage-reroute-test-sentinel=must-be-replaced', [EnvironmentVariableTarget]::User)
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $TruststoreUrl) | Out-Null
+Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 $post = [Environment]::GetEnvironmentVariable('JAVA_TOOL_OPTIONS', [EnvironmentVariableTarget]::User)
 if ($post -match 'package-reroute-test-sentinel') {
     Fail-Test "JTO env var was APPENDED to (sentinel survived). Re-install must replace. got: $post"
@@ -331,7 +279,7 @@ Write-Host "  ok"
 
 #-----------------------------------------------------------------------------
 Write-Host ""
-Write-Host "=== 8. -TruststoreUrl mandatory: no-args invocation fails ==="
+Write-Host "=== 8. -UseTruststore mandatory: no-args invocation fails ==="
 $out = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     -File '.\install_certs_jvm_windows.ps1' 2>&1
 $rc8 = $LASTEXITCODE
@@ -343,7 +291,7 @@ Write-Host "  ok (rc=$rc8)"
 
 #-----------------------------------------------------------------------------
 Cleanup
-Invoke-Installer -ScriptArgs @('-TruststoreUrl', $TruststoreUrl) | Out-Null
+Invoke-Installer -ScriptArgs @('-UseTruststore', $BundleJks) | Out-Null
 
 Write-Host ""
 Write-Host "=== 9. JKS preserves bundled public roots ==="
