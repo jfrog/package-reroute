@@ -190,8 +190,7 @@ validate_keystore_contains_subject() {
     return 0
 }
 
-# Extract the unquoted value from `export VAR="…"`. Handles both double-quoted
-# and bare forms written by ensure_export_in_file.
+# Extract the value from `export VAR='…'` (preferred) or `export VAR="…"`.
 get_export_value() {
     local file="$1" var="$2"
     local line
@@ -201,13 +200,13 @@ get_export_value() {
     line="$(read_file "$file" | grep -E "^export ${var}=" | head -1 || true)"
     [[ -n "$line" ]] || return 1
     line="${line#export ${var}=}"
-    # Strip one layer of surrounding quotes if present.
-    if [[ "$line" == \"*\" ]]; then
+    if [[ "$line" == \'*\' ]]; then
         line="${line:1:${#line}-2}"
+    elif [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
+        line="${line//\\\"/\"}"
+        line="${line//\\\\/\\}"
     fi
-    # Unescape \" and \\ that ensure_export_in_file wrote.
-    line="${line//\\\"/\"}"
-    line="${line//\\\\/\\}"
     printf '%s' "$line"
 }
 

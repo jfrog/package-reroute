@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
 # (c) JFrog Ltd. (2026)
-# Extract a JVM truststore from a Jamf-delivered macOS .pkg and wire it for
-# JVM clients (Maven, Gradle, sbt, Apache Ivy).
+# Wire a Jamf-installed JVM truststore for Maven, Gradle, sbt, and Apache Ivy.
 #
-# Single path: expand --use-pkg, copy the JKS payload into
+# Jamf installs the truststore .pkg so the JKS already exists at
 #   /Library/Application Support/JFrog/package-route-jvm/truststore.jks
-# then set JAVA_TOOL_OPTIONS in the target user's ~/.zshrc so every new JVM
-# startup inherits that trustStore path. KeychainStore is broken per
-# JDK-8321045, so there is no OS-trust fallback.
+# This script only writes JAVA_TOOL_OPTIONS in the target user's ~/.zshrc so
+# every new JVM startup inherits that trustStore path. KeychainStore is
+# broken per JDK-8321045, so there is no OS-trust fallback.
 #
-# Run (manual):
-#   sudo bash install_certs_jvm_macos.sh --use-pkg /path/to/truststore.pkg
-#       [--all-users]
+# Run:
+#   sudo bash install_certs_jvm_macos.sh [--all-users]
 #
-# Jamf policy: install the truststore .pkg first (payload lands at JKS_PATH),
-# then run this script. Jamf always prepends $1=/ $2=computer $3=user — those
-# are ignored. --use-pkg is optional when the JKS is already on disk.
+# Jamf policy: Packages payload first, then this script with no parameters.
+# Jamf always prepends $1=/ $2=computer $3=user and blank params 4-11 —
+# those are ignored.
 #
 # Notes:
 #   - macOS only.
-#   - Must run as root (write into /Library + chown per-user ~/.zshrc).
-#   - Requires pkgutil (macOS built-in). The pkg payload must contain a
-#     non-empty truststore.jks (or a single *.jks / *.p12 file).
+#   - Must run as root (chown per-user ~/.zshrc).
 #   - JVM trust only — does not configure npm/Python/HF and does not touch
 #     Docker credentials. Pair with install_certs_macos.sh if you need those.
 #   - Users need a new terminal (or `source ~/.zshrc`) for the env var to
@@ -43,23 +39,19 @@ JKS_DIR="/Library/Application Support/JFrog/package-route-jvm"
 JKS_PATH="${JKS_DIR}/truststore.jks"
 JKS_PASSWORD="changeit"
 
-USE_PKG=""
 ALL_USERS=0
 
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 [--use-pkg <path.pkg>] [--all-users]
+  sudo $0 [--all-users]
+
+Jamf must install the truststore package first so
+  ${JKS_PATH}
+exists (readable by JVMs with password '${JKS_PASSWORD}'). This script only
+writes JAVA_TOOL_OPTIONS into ~/.zshrc.
 
 Options:
-  --use-pkg <path.pkg>   Path to a macOS installer package whose payload
-                         contains the JVM truststore (prefer basename
-                         truststore.jks; otherwise a single *.jks / *.p12).
-                         The JKS is extracted into ${JKS_PATH}, then
-                         JAVA_TOOL_OPTIONS is wired to that path. Optional
-                         when Jamf has already installed the .pkg so
-                         ${JKS_PATH} exists. The truststore must be readable
-                         by JVMs with password '${JKS_PASSWORD}'.
   --all-users            Iterate /Users/* (UID >= 501, skip Shared) and write
                          the ~/.zshrc export for every account. Default =
                          only SUDO_USER (or the console-user under JAMF).
@@ -71,15 +63,15 @@ KeychainStore truststoreType is broken (JDK-8321045) and no OS-trust
 fallback exists.
 
 Examples:
-  sudo $0 --use-pkg /Library/Application\\ Support/JFrog/package-route-truststore.pkg
-  sudo $0 --use-pkg /tmp/package-route-truststore.pkg --all-users
+  sudo $0
+  sudo $0 --all-users
 EOF
 }
 
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 [--use-pkg <path.pkg>] [--all-users]" >&2
+        echo "Use: sudo $0 [--all-users]" >&2
         exit 1
     fi
 }
@@ -104,10 +96,6 @@ parse_args() {
                 # the policy leaves them blank.
                 shift
                 ;;
-            --use-pkg)
-                USE_PKG="${2:?Error: --use-pkg requires a value}"
-                shift 2
-                ;;
             --all-users)
                 ALL_USERS=1
                 shift
@@ -116,16 +104,6 @@ parse_args() {
                 usage
                 exit 0
                 ;;
-            *.pkg)
-                if [[ -z "$USE_PKG" ]]; then
-                    USE_PKG="$1"
-                    shift
-                else
-                    echo "Unknown option: $1" >&2
-                    usage >&2
-                    exit 1
-                fi
-                ;;
             *)
                 echo "Unknown option: $1" >&2
                 usage >&2
@@ -133,32 +111,6 @@ parse_args() {
                 ;;
         esac
     done
-
-    if [[ -n "$USE_PKG" ]]; then
-        if [[ ! -f "$USE_PKG" ]]; then
-            echo "Error: package file not found: $USE_PKG" >&2
-            exit 1
-        fi
-        if [[ ! -r "$USE_PKG" ]]; then
-            echo "Error: package file is not readable: $USE_PKG" >&2
-            exit 1
-        fi
-        if [[ ! -s "$USE_PKG" ]]; then
-            echo "Error: package file is empty: $USE_PKG" >&2
-            exit 1
-        fi
-        return 0
-    fi
-
-    # Jamf already installed the truststore package into the payload path.
-    if [[ -s "$JKS_PATH" ]]; then
-        return 0
-    fi
-
-    echo "Error: --use-pkg is required unless the truststore already exists at:" >&2
-    echo "       $JKS_PATH" >&2
-    usage >&2
-    exit 1
 }
 
 check_os() {
@@ -170,80 +122,29 @@ check_os() {
     fi
 }
 
-# Expand a component or product .pkg and copy the truststore payload to JKS_PATH.
-extract_truststore_from_pkg() {
-    if ! command -v pkgutil >/dev/null 2>&1; then
-        echo "Error: pkgutil is required to extract the truststore from a .pkg." >&2
-        exit 1
-    fi
-
-    echo "  [JKS] Extracting truststore from $USE_PKG"
-
-    # pkgutil --expand-full creates dest-dir; it must not already exist.
-    local expand_dir
-    expand_dir="$(mktemp -d /tmp/package-route-jvm-pkg.XXXXXX)"
-    rmdir "$expand_dir"
-    if ! pkgutil --expand-full "$USE_PKG" "$expand_dir" >/dev/null; then
-        echo "Error: failed to expand package: $USE_PKG" >&2
-        exit 1
-    fi
-
-    local named=() matches=() f
-    while IFS= read -r -d '' f; do
-        [[ -s "$f" ]] || continue
-        matches+=("$f")
-        if [[ "$(basename "$f")" == "truststore.jks" ]]; then
-            named+=("$f")
-        fi
-    done < <(find "$expand_dir" -type f \( -name '*.jks' -o -name '*.p12' \) -print0 2>/dev/null)
-
-    local source=""
-    if [[ "${#named[@]}" -eq 1 ]]; then
-        source="${named[0]}"
-    elif [[ "${#named[@]}" -gt 1 ]]; then
-        rm -rf "$expand_dir"
-        echo "Error: package contains multiple truststore.jks files; expected exactly one." >&2
-        exit 1
-    elif [[ "${#matches[@]}" -eq 1 ]]; then
-        source="${matches[0]}"
-    elif [[ "${#matches[@]}" -eq 0 ]]; then
-        rm -rf "$expand_dir"
-        echo "Error: package contains no JKS/PKCS12 truststore (looked for truststore.jks, *.jks, *.p12): $USE_PKG" >&2
-        exit 1
-    else
-        rm -rf "$expand_dir"
-        echo "Error: package contains ${#matches[@]} JKS/PKCS12 files and no unique truststore.jks; expected one." >&2
-        exit 1
-    fi
-
-    mkdir -p "$JKS_DIR"
-    cp "$source" "$JKS_PATH"
-    rm -rf "$expand_dir"
-    chmod 0755 "$JKS_DIR"
-    chmod 0644 "$JKS_PATH"
-    echo "  [JKS] Installed at $JKS_PATH"
-}
-
 jto_value_for_path() {
     local jks_path="$1"
     # The JKS path is under /Library/Application Support/ — the embedded
     # space breaks unquoted JAVA_TOOL_OPTIONS at the JVM tokenizer (which
     # splits on whitespace and only honours `"…"` grouping). Embed literal
-    # quotes around the path/password so they reach the JVM after .zshrc is
-    # sourced.
+    # double quotes around the path/password so they reach the JVM after
+    # .zshrc is sourced. The export itself is wrapped in single quotes so
+    # zsh does not treat those inner " as string terminators
+    # (export: not valid in this context: Support/JFrog/...).
     echo "-Djavax.net.ssl.trustStore=\"${jks_path}\" -Djavax.net.ssl.trustStorePassword=\"${JKS_PASSWORD}\""
 }
 
 replace_export_in_file() {
     local file="$1" var="$2" value="$3"
-    local tmp escaped
-
-    escaped="${value//\\/\\\\}"
-    escaped="${escaped//\"/\\\"}"
+    local tmp
 
     tmp="$(mktemp "${file}.XXXXXX")"
-    awk -v var="$var" -v val="$escaped" '
-        $0 ~ "^export " var "=" { print "export " var "=\"" val "\""; next }
+    # Outer single quotes so zsh does not close the string at the inner
+    # trustStore="…". awk -v treats \" as an escape, so pass the value
+    # through ENVIRON instead of -v.
+    JTO_EXPORT_VAL="$value" awk -v var="$var" -v q="'" '
+        BEGIN { val = ENVIRON["JTO_EXPORT_VAL"] }
+        $0 ~ "^export " var "=" { print "export " var "=" q val q; next }
         { print }
     ' "$file" > "$tmp"
     if [[ ! -s "$tmp" && -s "$file" ]]; then
@@ -263,9 +164,7 @@ ensure_export_in_file() {
     if grep -qE "^export ${var}=" "$file" 2>/dev/null; then
         replace_export_in_file "$file" "$var" "$value"
     else
-        local escaped="${value//\\/\\\\}"
-        escaped="${escaped//\"/\\\"}"
-        printf 'export %s="%s"\n' "$var" "$escaped" >> "$file"
+        printf "export %s='%s'\n" "$var" "$value" >> "$file"
     fi
 }
 
@@ -383,12 +282,15 @@ main() {
     parse_args "$@"
     check_os
 
-    echo
-    if [[ -n "$USE_PKG" ]]; then
-        extract_truststore_from_pkg
-    else
-        echo "  [JKS] Using already-installed truststore at $JKS_PATH"
+    if [[ ! -s "$JKS_PATH" ]]; then
+        echo "Error: truststore not found at:" >&2
+        echo "       $JKS_PATH" >&2
+        echo "       Install the Jamf truststore package first, then re-run this script." >&2
+        exit 1
     fi
+
+    echo
+    echo "  [JKS] Using already-installed truststore at $JKS_PATH"
 
     if [[ "$ALL_USERS" -eq 1 ]]; then
         local iter_count=0 user home

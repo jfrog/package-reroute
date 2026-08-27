@@ -8,16 +8,17 @@
 # Targets the SUDO_USER's per-user files. `cleanup` runs at the start of
 # fresh-state cases and via `trap EXIT`. The test runner builds a keychain-only
 # JKS via build_jvm_truststore_macos.sh, then imports a lab CA into that fixture
-# so --expected-subject stays deterministic. The installer extracts the JKS
-# from a component .pkg into the system path and wires ~/.zshrc.
+# so --expected-subject stays deterministic. Tests seed the JKS at the
+# system path (the same location Jamf's .pkg payload uses); the installer
+# only wires ~/.zshrc.
 #
 # Invariants exercised:
 #   1. Positive install + validate (subject substring match)
 #   2. Subject mismatch -> exit 1
 #   3. Idempotent re-install (copied JKS checksum stable; .zshrc export replaced)
-#   4. Missing --use-pkg is rejected; Jamf's positional prefix ($1=/ $2=computer
-#      $3=user) and its blank script parameters 4-11 are ignored
-#   5. Missing pkg path / pkg with no JKS are rejected
+#   4. Missing JKS at the system path is rejected; Jamf's positional prefix
+#      ($1=/ $2=computer $3=user) and blank script parameters 4-11 are ignored
+#   5. --use-pkg is rejected (Jamf installs the .pkg; this script only wires env)
 #   6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS
 #   7. --all-users iterates /Users/* and installs into every eligible account
 #      (covers the iter_all_users filter + per-user chown contract)
@@ -55,8 +56,6 @@ JKS_DIR="/Library/Application Support/JFrog/package-route-jvm"
 JKS="${JKS_DIR}/truststore.jks"
 ZSHRC="${TEST_HOME}/.zshrc"
 BUNDLE_JKS="/tmp/jvm-mac-bundled-truststore.jks"
-BUNDLE_PKG="/tmp/jvm-mac-truststore.pkg"
-NO_JKS_PKG="/tmp/jvm-mac-no-jks.pkg"
 ZSHRC_BACKUP=""
 
 echo "Test user: $TEST_USER (uid=$TEST_UID, home=$TEST_HOME)"
@@ -113,7 +112,7 @@ cleanup() {
 final_cleanup() {
     cleanup
     restore_zshrc
-    rm -f "$BUNDLE_JKS" "$BUNDLE_PKG" "$NO_JKS_PKG"
+    rm -f "$BUNDLE_JKS"
 }
 backup_zshrc
 trap final_cleanup EXIT
@@ -151,32 +150,12 @@ build_bundle_truststore() {
     echo "Bundled truststore fixture: $BUNDLE_JKS"
 }
 
-build_pkg_from_root() {
-    local out_pkg="$1" root="$2"
-    command -v pkgbuild >/dev/null 2>&1 || fail_msg "pkgbuild not on PATH (needed to build the Jamf-style fixture)"
-    rm -f "$out_pkg"
-    pkgbuild --root "$root" \
-        --identifier "com.jfrog.package-route.jvm-truststore.test" \
-        --version "1.0" \
-        "$out_pkg" >/dev/null
-}
-
-build_truststore_pkg() {
-    local root
-    root="$(mktemp -d /tmp/jvm-mac-pkg-root.XXXXXX)"
-    mkdir -p "$root/Library/Application Support/JFrog/package-route-jvm"
-    cp "$BUNDLE_JKS" "$root/Library/Application Support/JFrog/package-route-jvm/truststore.jks"
-    build_pkg_from_root "$BUNDLE_PKG" "$root"
-    rm -rf "$root"
-    echo "Truststore pkg fixture: $BUNDLE_PKG"
-}
-
-build_no_jks_pkg() {
-    local root
-    root="$(mktemp -d /tmp/jvm-mac-pkg-nojks.XXXXXX)"
-    echo "no truststore" > "$root/README.txt"
-    build_pkg_from_root "$NO_JKS_PKG" "$root"
-    rm -rf "$root"
+# Mimic Jamf installing the truststore package: payload already at JKS_PATH.
+seed_installed_jks() {
+    mkdir -p "$JKS_DIR"
+    cp "$BUNDLE_JKS" "$JKS"
+    chmod 0755 "$JKS_DIR"
+    chmod 0644 "$JKS"
 }
 
 # Generate the lab CA used by all positive cases.
@@ -187,8 +166,6 @@ build_no_jks_pkg() {
 
 require_keytool
 build_bundle_truststore /tmp/jvm-mac-test-ca.pem
-build_truststore_pkg
-build_no_jks_pkg
 
 # Capture combined stdout/stderr to a tempfile and only dump it on an
 # *unexpected* exit. Negative tests need silence on the expected-fail path
@@ -237,21 +214,40 @@ get_zshrc_jto() {
     line="$(grep -E '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" | head -1 || true)"
     [[ -n "$line" ]] || return 1
     line="${line#export JAVA_TOOL_OPTIONS=}"
-    if [[ "$line" == \"*\" ]]; then
+    if [[ "$line" == \'*\' ]]; then
         line="${line:1:${#line}-2}"
+    elif [[ "$line" == \"*\" ]]; then
+        line="${line:1:${#line}-2}"
+        line="${line//\\\"/\"}"
+        line="${line//\\\\/\\}"
     fi
-    line="${line//\\\"/\"}"
-    line="${line//\\\\/\\}"
     printf '%s' "$line"
+}
+
+# The export must source in zsh (nested unescaped "…" does not) and leave
+# inner double quotes for the JVM tokenizer (single quotes do not group).
+assert_zshrc_jto_sources() {
+    local raw jto_from_zsh
+    raw="$(grep -E '^export JAVA_TOOL_OPTIONS=' "$ZSHRC" | head -1 || true)"
+    [[ -n "$raw" ]] || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
+    [[ "$raw" == export\ JAVA_TOOL_OPTIONS=\'*\' ]] \
+        || fail_msg "expected outer single quotes around JAVA_TOOL_OPTIONS (got: $raw)"
+    jto_from_zsh="$(zsh -c "$raw"$'\n''print -r -- $JAVA_TOOL_OPTIONS' 2>&1)" \
+        || fail_msg "zsh rejected JAVA_TOOL_OPTIONS export: $jto_from_zsh"
+    case "$jto_from_zsh" in
+        *"trustStore=\"${JKS}\""*) ;;
+        *) fail_msg "after zsh source, JAVA_TOOL_OPTIONS missing inner double quotes around JKS (got: $jto_from_zsh)" ;;
+    esac
 }
 
 #-----------------------------------------------------------------------------
 echo
 echo "=== 1. positive: install + validate ==="
 cleanup
+seed_installed_jks
 # Positive cases let stdout through so a CI failure shows a useful log; only
 # negative cases (where we *expect* exit 1) silence both streams.
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG"
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh
 SUDO_USER="$TEST_USER" ./validate_certs_jvm_macos.sh --expected-subject "Lab JVM mac CA Test"
 echo "  ok"
 
@@ -266,7 +262,7 @@ echo "  ok"
 #-----------------------------------------------------------------------------
 echo
 echo "=== 3. idempotency: 2nd install preserves bundled JKS / single .zshrc export ==="
-install_as_test_user --use-pkg "$BUNDLE_PKG"
+install_as_test_user
 validate_as_test_user --expected-subject "Lab JVM mac CA Test"
 
 bundle_sha="$(shasum -a 256 "$BUNDLE_JKS" | awk '{print $1}')"
@@ -283,46 +279,39 @@ case "$jto" in
     *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) ;;
     *) fail_msg ".zshrc JAVA_TOOL_OPTIONS mismatch after re-install (got: $jto)" ;;
 esac
+assert_zshrc_jto_sources
 echo "  ok (alias_count=$alias_count, sha=$installed_sha)"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4. negative: missing --use-pkg rejected when JKS is not installed ==="
+echo "=== 4. negative: missing JKS at system path is rejected ==="
+cleanup
 if install_as_test_user; then
     dump_last_log
-    fail_msg "installer should have rejected missing --use-pkg when JKS is absent"
+    fail_msg "installer should have rejected a missing truststore at $JKS"
 fi
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4b. Jamf prefix args (\$1=/) + --use-pkg succeeds ==="
+echo "=== 4b. Jamf prefix args (\$1=/ \$2=computer \$3=user) succeed ==="
 cleanup
-if ! install_as_test_user / "jamf-test-mac" "$TEST_USER" --use-pkg "$BUNDLE_PKG"; then
+seed_installed_jks
+if ! install_as_test_user / "jamf-test-mac" "$TEST_USER"; then
     dump_last_log
-    fail_msg "Jamf-style invocation with / computer user --use-pkg should succeed"
+    fail_msg "Jamf-style invocation with / computer user should succeed"
 fi
 validate_as_test_user --expected-subject "Lab JVM mac CA Test" || { dump_last_log; fail_msg "validate after Jamf-style install failed"; }
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 4c. Jamf prefix with no --use-pkg uses already-installed JKS ==="
-# Leave the JKS from 4b in place; Jamf policies install the pkg then run the
-# script with only \$1=/ \$2=computer \$3=user.
-if ! install_as_test_user / "jamf-test-mac" "$TEST_USER"; then
-    dump_last_log
-    fail_msg "Jamf-style invocation without --use-pkg should succeed when JKS is already installed"
-fi
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 4d. Jamf blank script parameters 4-11 are ignored ==="
+echo "=== 4c. Jamf blank script parameters 4-11 are ignored ==="
 # Jamf hands every unset script parameter to the script as an empty string, so
 # the parser must skip them instead of reporting "Unknown option: ".
 cleanup
-if ! install_as_test_user / "jamf-test-mac" "$TEST_USER" --use-pkg "$BUNDLE_PKG" "" "" "" "" "" "" ""; then
+seed_installed_jks
+if ! install_as_test_user / "jamf-test-mac" "$TEST_USER" "" "" "" "" "" "" "" ""; then
     dump_last_log
     fail_msg "Jamf-style invocation with blank trailing parameters should succeed"
 fi
@@ -335,42 +324,38 @@ echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 5. negative: missing pkg path rejected ==="
-if install_as_test_user --use-pkg /tmp/no-such-jvm-truststore.pkg; then
+echo "=== 5. negative: --use-pkg is rejected ==="
+seed_installed_jks
+if install_as_test_user --use-pkg /tmp/ignored.pkg; then
     dump_last_log
-    fail_msg "installer should have rejected missing pkg path"
+    fail_msg "installer should have rejected --use-pkg (Jamf installs the pkg; this script only wires env)"
 fi
 echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 6. negative: pkg with no JKS rejected ==="
-if install_as_test_user --use-pkg "$NO_JKS_PKG"; then
-    dump_last_log
-    fail_msg "installer should have rejected pkg with no JKS payload"
-fi
-echo "  ok"
-
-#-----------------------------------------------------------------------------
-echo
-echo "=== 7. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS ==="
+echo "=== 6. ~/.zshrc exports JAVA_TOOL_OPTIONS pointing at the installed JKS ==="
 cleanup
-install_as_test_user --use-pkg "$BUNDLE_PKG"
+seed_installed_jks
+install_as_test_user
 jto="$(get_zshrc_jto)" || fail_msg ".zshrc missing export JAVA_TOOL_OPTIONS"
 case "$jto" in
-    *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) echo "  ok" ;;
+    *"trustStore=\"${JKS}\""*|*"trustStore=${JKS}"*) ;;
     *) fail_msg ".zshrc JAVA_TOOL_OPTIONS mismatch (got: $jto)" ;;
 esac
+assert_zshrc_jto_sources
+echo "  ok"
 
 #-----------------------------------------------------------------------------
 echo
-echo "=== 8. --all-users iterates eligible accounts ==="
+echo "=== 7. --all-users iterates eligible accounts ==="
 cleanup
+seed_installed_jks
 # CI runners only have a single user (`runner`, uid 501). That's enough to
 # verify iter_all_users does at least one iteration through the filter +
 # per-user-chown path; multi-user is covered by the local dev Mac smoke.
 # Run without SUDO_USER set so the installer takes the --all-users branch.
-out="$(./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG" --all-users 2>&1)"
+out="$(./install_certs_jvm_macos.sh --all-users 2>&1)"
 echo "$out" | grep -q "=== User: ${TEST_USER}" \
     || { echo "$out" | tail -20; fail_msg "--all-users did not iterate ${TEST_USER}"; }
 echo "$out" | grep -qE "Installed for [0-9]+ user\(s\)" \
@@ -384,10 +369,11 @@ echo "  ok"
 #-----------------------------------------------------------------------------
 # Re-install once so the next three invariants observe the final end state.
 cleanup
-SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh --use-pkg "$BUNDLE_PKG" >/dev/null
+seed_installed_jks
+SUDO_USER="$TEST_USER" ./install_certs_jvm_macos.sh >/dev/null
 
 echo
-echo "=== 9. JKS extends bundled public roots ==="
+echo "=== 8. JKS extends bundled public roots ==="
 # Regression guard for the "trustStore replaces, not extends" footgun.
 # -Djavax.net.ssl.trustStore in OpenJDK swaps the JVM's trust source; a JKS
 # holding only the corporate CA would break every public-CA TLS handshake
@@ -400,7 +386,7 @@ alias_count="${alias_count:-0}"
 echo "  ok ($alias_count aliases)"
 
 echo
-echo "=== 10. JKS contains a well-known public root (DigiCert family) ==="
+echo "=== 9. JKS contains a well-known public root (DigiCert family) ==="
 # Spot-check the merge actually happened. DigiCert root certs ship in every
 # macOS system trust bundle under several names; case-insensitive substring
 # match catches the family.
@@ -410,7 +396,7 @@ keytool -list -v -keystore "$JKS" -storepass changeit 2>/dev/null \
 echo "  ok"
 
 echo
-echo "=== 11. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
+echo "=== 10. JAVA_TOOL_OPTIONS round-trips through JVM tokenizer ==="
 # Direct repro of the "Application Support" space-tokenisation bug. Spawn a
 # child java -version with the .zshrc export value and assert the JVM does
 # NOT print "Unrecognized option" — that's what an unquoted trustStore path

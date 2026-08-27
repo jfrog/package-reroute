@@ -21,7 +21,7 @@ Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-11
 |--------|----------|---------|
 | **install_certs_macos.sh** | macOS | Install cert, set env vars (Node/Python), and clear Docker Hub credentials |
 | **validate_install_macos.sh** | macOS | Validate PEM and env config |
-| **install_certs_jvm_macos.sh** | macOS (JVM) | Extract JKS from a Jamf `.pkg` into system path, wire per-user `~/.zshrc` `JAVA_TOOL_OPTIONS` (Maven/Gradle/sbt/Ivy) |
+| **install_certs_jvm_macos.sh** | macOS (JVM) | Wire per-user `~/.zshrc` `JAVA_TOOL_OPTIONS` to the Jamf-installed JKS (Maven/Gradle/sbt/Ivy) |
 | **validate_certs_jvm_macos.sh** | macOS (JVM) | Validate JVM truststore install (fixed JKS path subject + `~/.zshrc` export) |
 | **build_jvm_truststore_macos.sh** | macOS (JVM) | Build installer-ready JKS from macOS system keychains |
 | **install_certs_debian_ubuntu.sh** | Debian/Ubuntu | Install cert into system trust + profile.d + user shell rc + Docker cleanup |
@@ -331,29 +331,28 @@ Users must open a **new terminal** (or `source ~/.zshrc`) for the new environmen
 
 ### Overview
 
-`install_certs_jvm_macos.sh` extracts a JVM truststore from a macOS `.pkg` (the format Jamf can push) and wires it into the JVM trust path so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_macos.sh` if you need those.
+`install_certs_jvm_macos.sh` wires a Jamf-installed JVM truststore into the JVM trust path so Maven, Gradle, sbt, and Apache Ivy traffic redirected through `package-reroute` validates correctly. **JVM trust only** — does not configure Node/npm or Python, and does not touch Docker credentials. Pair with `install_certs_macos.sh` if you need those.
 
 Single path on macOS — there is no OS-trust fallback because macOS-specific `KeychainStore` is broken per [JDK-8321045](https://bugs.openjdk.org/browse/JDK-8321045). The script:
 
-1. If `--use-pkg` is given, expands it with `pkgutil --expand-full` and copies `truststore.jks` into `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`. If Jamf already installed that package, the file is already there and `--use-pkg` can be omitted.
+1. Requires `/Library/Application Support/JFrog/package-route-jvm/truststore.jks` already on disk (Jamf Packages payload installs it).
 2. Writes or updates `export JAVA_TOOL_OPTIONS=…` in the target user's `~/.zshrc` so JVMs use that fixed path.
 
-Jamf always invokes policy scripts as `script / <computerName> <user> …`. The installer ignores that prefix so a leading `/` is not treated as an option.
+Jamf always invokes policy scripts as `script / <computerName> <user> …`. The installer ignores that prefix and any blank script parameters. Pass **no** script parameters in the policy.
 
 Terminal and IntelliJ sessions that inherit a shell environment with that export pick up the truststore. Open a new terminal (or `source ~/.zshrc`) after install; restart the IDE if it was already running.
 
 ### Requirements
 
 - **macOS**.
-- **Root** (`sudo`) — needed to write under `/Library/Application Support/` and to chown per-user files under `--all-users`.
-- **`pkgutil`** and **`pkgbuild`** (for building the payload package; both ship with macOS / Xcode CLT).
+- **Root** (`sudo`) — needed to chown per-user files under `--all-users`.
+- The truststore package already installed so the JKS exists at the path above.
 - macOS built-ins used by the installer: `dscl` (user / home lookup), `stat` (UID-based filtering under `--all-users`).
 
 ### Options
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--use-pkg <path.pkg>` | No (required only if the JKS is not already installed) | Path to a component `.pkg` whose payload contains the JVM truststore. Prefer basename `truststore.jks`; otherwise a single `*.jks` / `*.p12`. Extracted into the fixed system path, then referenced by `JAVA_TOOL_OPTIONS`. Must be readable by JVMs with password `changeit`. |
 | `--all-users` | No | Iterate `/Users/*` and write the `~/.zshrc` export for every account with UID ≥ 501. Default = only `SUDO_USER` (or the GUI console user under JAMF). |
 | `-h`, `--help` | — | Usage. |
 
@@ -361,10 +360,10 @@ Terminal and IntelliJ sessions that inherit a shell environment with that export
 
 ```bash
 # Single user (typical: install for the developer running sudo)
-sudo ./install_certs_jvm_macos.sh --use-pkg /tmp/package-route-truststore.pkg
+sudo ./install_certs_jvm_macos.sh
 
 # Fleet onboarding (shared Mac with multiple accounts)
-sudo ./install_certs_jvm_macos.sh --use-pkg /tmp/package-route-truststore.pkg --all-users
+sudo ./install_certs_jvm_macos.sh --all-users
 ```
 
 ### Validation: validate_certs_jvm_macos.sh
@@ -388,7 +387,7 @@ sudo ./validate_certs_jvm_macos.sh --expected-subject "O=Zscaler" --all-users
 - **`Picked up JAVA_TOOL_OPTIONS:` banner.** Every JVM startup prints this to stderr. CI parsers that strict-match empty-stderr need to tolerate it.
 - **`changeit` truststore password.** OpenJDK convention; *not* a secret. The JKS holds only public CA certificates and the password protects file integrity, not contents.
 - **The packaged JKS must include public roots.** `-Djavax.net.ssl.trustStore=…` in OpenJDK *replaces* the JVM trust source — a JKS containing only the corporate CA would break every public-CA TLS handshake (Maven Central, Gradle plugin portal, Let's Encrypt-fronted mirrors). The release process that creates the bundled truststore owns including public roots plus the corporate CA before packaging.
-- **`JAVA_TOOL_OPTIONS` inner quoting.** The install path contains spaces (`Application Support`); the JVM tokenises `JAVA_TOOL_OPTIONS` on whitespace and only honours embedded `"…"` grouping. The installer writes `-Djavax.net.ssl.trustStore="<path>" -Djavax.net.ssl.trustStorePassword="changeit"` into `~/.zshrc` so the literal quotes reach the JVM tokenizer.
+- **`JAVA_TOOL_OPTIONS` quoting.** The install path contains spaces (`Application Support`). The JVM tokenises `JAVA_TOOL_OPTIONS` on whitespace and only honours embedded `"…"` grouping — not single quotes. The installer writes `export JAVA_TOOL_OPTIONS='-Djavax.net.ssl.trustStore="<path>" -Djavax.net.ssl.trustStorePassword="changeit"'` (outer single quotes for zsh, inner double quotes for the JVM). Nested unescaped double quotes (`export VAR="… trustStore="/path with space" …"`) make zsh fail with `not valid in this context: Support/JFrog/…`.
 - **`KeychainStore` truststoreType is rejected.** Broken per JDK-8321045 — incomplete for `SystemRootCertificates.keychain`. No OS-trust fallback on macOS.
 - **IntelliJ per-IDE SSL store** (`~/Library/Application Support/JetBrains/IntelliJIdea<ver>/ssl/cacerts`) is a different layer (plugin marketplace, VCS). Not configured by this script.
 
@@ -409,15 +408,16 @@ pkgbuild --root "$root" \
   ./package-route-truststore.pkg
 rm -rf "$root"
 
-# Jamf pushes the .pkg to the Mac, then:
-sudo ./install_certs_jvm_macos.sh --use-pkg ./package-route-truststore.pkg
+# Jamf pushes the .pkg (payload lands at the JKS path). Then run the script
+# with no parameters:
+sudo ./install_certs_jvm_macos.sh
 ```
 
-The payload path inside the pkg does not have to match the runtime path; the installer searches for `truststore.jks` (or a unique `*.jks` / `*.p12`).
+The `.pkg` payload must place `truststore.jks` at `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
 
 ### Testing
 
-`./testing/test_install_certs_jvm_macos.sh` runs the smoke matrix locally and on CI. Each run targets `SUDO_USER`'s per-user files, builds a fixture `.pkg` with `pkgbuild`, and cleans up between cases via `trap EXIT` (including the system JKS under `/Library/Application Support/JFrog/package-route-jvm`).
+`./testing/test_install_certs_jvm_macos.sh` runs the smoke matrix locally and on CI. Each run targets `SUDO_USER`'s per-user files, seeds a fixture JKS at the system path (as Jamf's package would), and cleans up between cases via `trap EXIT` (including the system JKS under `/Library/Application Support/JFrog/package-route-jvm`).
 
 ```bash
 # Local
@@ -428,7 +428,7 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 
 ### Summary (macOS JVM)
 
-- **One run as root**, extract `--use-pkg` into `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
+- **One run as root** after Jamf has installed the truststore package at `/Library/Application Support/JFrog/package-route-jvm/truststore.jks`.
 - Per-user `export JAVA_TOOL_OPTIONS=…` in `~/.zshrc` pointing at that fixed path.
 - **Idempotent**, **re-runnable**, **JDK-version-agnostic**. New JDK installs do not require re-running the script.
 - New terminal (or `source ~/.zshrc`); restart IDE if already running; `gradle --stop` for the Gradle Daemon.
