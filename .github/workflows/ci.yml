@@ -18,6 +18,29 @@ jobs:
       - name: Run macOS tests
         run: sudo ./testing/test_install_certs_macos.sh
 
+  test-macos-jvm:
+    name: Test (macOS JVM)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Pass JAVA_HOME and PATH explicitly to the sudo'd test runner rather
+      # than relying on `sudo --preserve-env=…`: future actions/setup-java
+      # versions could rename or rescope the JAVA_HOME env var, silently
+      # breaking the preserve-by-name approach. Explicit `env VAR=…` is
+      # the same idiom and survives such churn.
+      - name: Run macOS JVM smoke matrix
+        run: |
+          sudo env \
+            JAVA_HOME="$JAVA_HOME" \
+            PATH="$JAVA_HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            ./testing/test_install_certs_jvm_macos.sh
+
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest
@@ -27,3 +50,32 @@ jobs:
       - name: Run Windows tests
         shell: pwsh
         run: ./testing/test_install_certs_windows.ps1
+
+  test-windows-jvm:
+    name: Test (Windows JVM)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Run Windows JVM smoke matrix
+        shell: pwsh
+        run: ./testing/test_install_certs_jvm_windows.ps1
+
+  test-linux-jvm:
+    name: Test (Linux JVM)
+    runs-on: ubuntu-latest
+    # No actions/setup-java here — unlike the macOS/Windows JVM jobs that
+    # exercise a single host JDK, this job runs a 4-distro Docker matrix
+    # (Ubuntu / Debian / RHEL / Amazon Linux) and installs a JDK *inside*
+    # each container. The host runner doesn't need a JDK; setting one up
+    # would only mask divergence in the per-distro keytool versions.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Linux JVM smoke matrix
+        run: ./testing/test_install_certs_jvm_linux.sh
