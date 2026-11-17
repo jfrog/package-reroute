@@ -61,6 +61,11 @@ function Get-SubjectFromPemBlock {
 
 function Validate-Pem {
     param([string]$Path, [string]$Label = $Path)
+    if ($Path -eq 'truststore') {
+        Write-Host "  FAIL: value 'truststore' is not supported (breaks conda < 23.11); use the full-store PEM path" -ForegroundColor Red
+        $script:FailCount++
+        return $false
+    }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         Write-Host "  FAIL: file does not exist: $Path" -ForegroundColor Red
         $script:FailCount++
@@ -92,7 +97,7 @@ function Validate-Pem {
 # Get effective cert paths for current user (User overrides Machine on Windows).
 function Get-CurrentUserCertPaths {
     $paths = @()
-    foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE")) {
+    foreach ($var in @("NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CONDA_SSL_VERIFY", "MAMBA_SSL_VERIFY")) {
         $val = [Environment]::GetEnvironmentVariable($var, "User")
         if ([string]::IsNullOrWhiteSpace($val)) { $val = [Environment]::GetEnvironmentVariable($var, "Machine") }
         if (-not [string]::IsNullOrWhiteSpace($val)) {
@@ -137,7 +142,9 @@ function Get-OtherUserCertPaths {
             $nodePath = (Get-ItemProperty -Path $keyPath -Name "NODE_EXTRA_CA_CERTS" -ErrorAction SilentlyContinue).NODE_EXTRA_CA_CERTS
             $pipPath = (Get-ItemProperty -Path $keyPath -Name "REQUESTS_CA_BUNDLE" -ErrorAction SilentlyContinue).REQUESTS_CA_BUNDLE
             $sslPath = (Get-ItemProperty -Path $keyPath -Name "SSL_CERT_FILE" -ErrorAction SilentlyContinue).SSL_CERT_FILE
-            foreach ($p in @($nodePath, $pipPath, $sslPath)) {
+            $condaPath = (Get-ItemProperty -Path $keyPath -Name "CONDA_SSL_VERIFY" -ErrorAction SilentlyContinue).CONDA_SSL_VERIFY
+            $mambaPath = (Get-ItemProperty -Path $keyPath -Name "MAMBA_SSL_VERIFY" -ErrorAction SilentlyContinue).MAMBA_SSL_VERIFY
+            foreach ($p in @($nodePath, $pipPath, $sslPath, $condaPath, $mambaPath)) {
                 if (-not [string]::IsNullOrWhiteSpace($p)) {
                     $p = $p.Trim().Trim('"').Trim("'")
                     if ($p -and $paths -notcontains $p) { $paths += $p }
@@ -164,7 +171,7 @@ if ($AllUsers) {
         $userHome = $ud.FullName
         $paths = Get-OtherUserCertPaths -ProfilePath $userHome
         if ($paths.Count -eq 0) {
-            Write-Host "  SKIP: user $($ud.Name) has no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE set"
+            Write-Host "  SKIP: user $($ud.Name) has no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CONDA_SSL_VERIFY or MAMBA_SSL_VERIFY set"
             continue
         }
         Write-Host "  Checking user $($ud.Name)..."
@@ -176,7 +183,7 @@ if ($AllUsers) {
     Write-Host "Validating current user config (env) and cert path(s)..."
     $paths = Get-CurrentUserCertPaths
     if ($paths.Count -eq 0) {
-        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE set for current user"
+        Write-Host "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CONDA_SSL_VERIFY or MAMBA_SSL_VERIFY set for current user"
     } else {
         foreach ($p in $paths) {
             Validate-Pem -Path $p | Out-Null

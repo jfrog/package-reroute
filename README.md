@@ -1,6 +1,6 @@
 # Certificate installation scripts
 
-Scripts to install a CA certificate, configure Node/npm, Python (pip, uv, Hugging Face Hub, and related TLS clients), Ruby where supported, and clear Docker Hub credentials that can break redirected Docker Hub pulls.
+Scripts to install a CA certificate, configure Node/npm, Python (pip, uv, Hugging Face Hub, and related TLS clients), Conda clients (conda, micromamba/mamba 2.x, pixi), Ruby where supported, and clear Docker Hub credentials that can break redirected Docker Hub pulls.
 
 This document describes the certificate installation and validation scripts for **macOS**, **Linux (Debian/Ubuntu)**, and **Windows**.
 
@@ -9,9 +9,9 @@ This document describes the certificate installation and validation scripts for 
 | Your toolchain | Your OS | Go to |
 |---|---|---|
 | **Maven / Gradle / sbt / Ivy** (JVM) | Linux | [Linux (JVM)](#linux-jvm-install_certs_jvm_linuxsh) |
-| **Node / npm or Python (pip / uv / Hugging Face)** | macOS | [macOS](#macos-install_certs_macossh) |
-| **Node / npm or Python** | Linux (Debian / Ubuntu) | [Linux (Debian/Ubuntu)](#linux-debianubuntu-install_certs_debian_ubuntush) |
-| **Node / npm or Python** | Windows | [Windows](#windows-install_certs_windowsps1) |
+| **Node / npm, Python (pip / uv / Hugging Face) or Conda (conda / micromamba / mamba / pixi)** | macOS | [macOS](#macos-install_certs_macossh) |
+| **Node / npm, Python or Conda** | Linux (Debian / Ubuntu) | [Linux (Debian/Ubuntu)](#linux-debianubuntu-install_certs_debian_ubuntush) |
+| **Node / npm, Python or Conda** | Windows | [Windows](#windows-install_certs_windowsps1) |
 
 Reference: research wiki [Maven Support in package-reroute (DFLOW-136 / DFLOW-116)](https://jfrog-int.atlassian.net/wiki/spaces/RTFACT/pages/2440101931/).
 
@@ -47,6 +47,10 @@ Environment variables by platform (see each section for details):
 | `UV_SYSTEM_CERTS=true` | Python **uv** | Set by macOS and Windows for **`python`**, **`huggingface`**, or **`all`** |
 | `REQUESTS_CA_BUNDLE=<path>` | Python **requests** / many HTTPS stacks | PEM or bundle path |
 | `SSL_CERT_FILE=<path>` | OpenSSL-backed tools, including Ruby | Set on **Debian/Ubuntu** for **`python`**, **`huggingface`**, or **`all`** to the system CA bundle; on **Windows** for **`python`**, **`huggingface`**, **`ruby`**, or **`all`** to the same PEM as other cert vars (`package-route.pem` or `-UseCert` path) |
+| `CONDA_SSL_VERIFY=<pem>` | **conda** (all versions) | Set when **`conda` or `all`**, always to a **PEM path**. **Never `truststore`** — see [Conda](#conda-conda-micromambamamba-2x-pixi) |
+| `MAMBA_SSL_VERIFY=<pem>` | **micromamba / mamba 2.x** | Set when **`conda` or `all`**. They ignore `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` and `CONDA_SSL_VERIFY` |
+| `PIXI_TLS_ROOT_CERTS=native` | **pixi** (0.84+) | Set when **`conda` or `all`**: use the OS trust store |
+| `MAMBA_SSL_NO_REVOKE=true` | **micromamba / mamba 2.x** | **Windows only**, **`conda` or `all`**: skips the Schannel revocation check that fails behind SSL inspection |
 | `HF_HUB_DISABLE_XET=1` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: disables XET (not supported with typical MITM / Artifactory redirect flows) |
 | `HF_HUB_ETAG_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: ETag check timeout (seconds); reduces spurious failures on slow paths |
 | `HF_HUB_DOWNLOAD_TIMEOUT=86400` | Python **huggingface_hub** | Set when **`huggingface` or `all`**: download timeout (seconds) |
@@ -76,6 +80,32 @@ The cleanup runs in the user context where possible because Docker credentials a
 - **Windows:** runs for the current PowerShell user. If the script runs as `SYSTEM`, Docker cleanup is skipped with a warning because the user's Docker credential store is not accessible from that context.
 
 Known limitation: Docker Desktop GUI sign-in can recreate CLI credentials later. If a user signed in through Docker Desktop, sign out in the Docker Desktop UI as well.
+
+---
+
+## Conda (conda, micromamba/mamba 2.x, pixi)
+
+The install scripts configure Conda clients with environment variables only, so machines where the client is installed later are covered too. Select them with `--package conda` (macOS, Debian/Ubuntu) or `-Package conda` (Windows); `all` includes them.
+
+| Client | Variable(s) it honors | Set by the scripts |
+|--------|----------------------|--------------------|
+| **conda** (all versions) | `CONDA_SSL_VERIFY` (PEM path) or `REQUESTS_CA_BUNDLE` | `CONDA_SSL_VERIFY=<pem>` |
+| **micromamba / mamba 2.x** | `MAMBA_SSL_VERIFY` (PEM path). They **ignore** `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` and `CONDA_SSL_VERIFY` | `MAMBA_SSL_VERIFY=<pem>`; Windows also `MAMBA_SSL_NO_REVOKE=true` |
+| **pixi** (0.84+) | `PIXI_TLS_ROOT_CERTS=native` (OS trust store) or `SSL_CERT_FILE` | `PIXI_TLS_ROOT_CERTS=native`; macOS also `SSL_CERT_FILE` if not already set |
+
+Per OS:
+
+- **macOS:** `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY`, `PIXI_TLS_ROOT_CERTS=native`, and `SSL_CERT_FILE` (only if absent), all in `~/.zshrc`.
+- **Linux (Debian/Ubuntu):** `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY`, `SSL_CERT_FILE` (all the system bundle `/etc/ssl/certs/ca-certificates.crt`) and `PIXI_TLS_ROOT_CERTS=native`, in `/etc/profile.d/package-route-certs.sh` and the target user's shell rc. There is no generic RHEL script yet; on RHEL-family hosts export the same variables pointing at `/etc/pki/tls/certs/ca-bundle.crt` (after `update-ca-trust`).
+- **Windows:** `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY` (the PEM), `MAMBA_SSL_NO_REVOKE=true` (needed by standalone micromamba, whose Schannel revocation check fails behind SSL inspection) and `PIXI_TLS_ROOT_CERTS=native`, at User scope (`-ExtractPath`) or Machine scope (`-UseCert`).
+
+**The PEM must be the full trust store.** Clients given a PEM *replace* their default roots, and the redirected hop to Artifactory is served with a public CA chain. A PEM containing only the SASE/inspection CA therefore fails on that second hop. `--extract-path` / `-ExtractPath` exports the full store (public roots + enterprise root + intermediates). With `--use-cert` / `-UseCert` you must supply a full-store bundle; for Netskope include the intermediate as well. On Debian/Ubuntu the system bundle already is the full store.
+
+**Why `CONDA_SSL_VERIFY` is also set.** `REQUESTS_CA_BUNDLE` already covers conda, but it is only written by the `python` / `huggingface` / `all` packages. Setting `CONDA_SSL_VERIFY=<pem>` makes `--package conda` self-sufficient and works on every conda version. micromamba/mamba and pixi ignore it, which is harmless.
+
+> **Do not set `CONDA_SSL_VERIFY=truststore`.** It is not ignored on conda older than 23.11 (4.12–23.10): every command that loads the config (`conda info`, `install`, ...) fails with `CustomValidationError: Parameter ssl_verify = 'truststore' ... is invalid`. It also does nothing on Linux and does not help micromamba/mamba/pixi (`MAMBA_SSL_VERIFY=truststore` is a hard error there). Always use a PEM path. The validate scripts fail on a `truststore` value.
+
+Verify with the platform's validate script, then e.g. `conda info`, `micromamba info`, or `pixi info`.
 
 ---
 
@@ -113,7 +143,7 @@ sudo ./install_certs_macos.sh [OPTIONS]
 
 | Option | Required | Description |
 |--------|----------|-------------|
-| `--package <npm\|python\|huggingface\|all>` | No (default: **all**) | **npm** (Node only), **python** (Python TLS: uv, requests—no Hugging Face Hub vars), **huggingface** (Python TLS + `HF_HUB_*`), **all** (npm + python + Hugging Face Hub). |
+| `--package <npm\|python\|huggingface\|conda\|all>` | No (default: **all**) | **npm** (Node only), **python** (Python TLS: uv, requests—no Hugging Face Hub vars), **huggingface** (Python TLS + `HF_HUB_*`), **conda** (conda, micromamba/mamba 2.x, pixi), **all** (npm + python + Hugging Face Hub + conda). |
 | `--extract-path <path>` | Yes* | Directory **under each user’s home** where **package-route.pem** is written: `~/<path with leading / stripped>/package-route.pem` (e.g. `opt/certs` → `~/opt/certs/...`, `certs` → `~/certs/...`). |
 | `--use-cert <path>` | Yes* | Use this existing PEM file instead of exporting from Keychain. Cannot be used with `--extract-path`. |
 | `--install-dependencies` | No | If **openssl** is missing, install it via Homebrew and continue in the same run. |
@@ -179,7 +209,7 @@ sudo ./install_certs_macos.sh \
 | Option | Description |
 |--------|--------------|
 | `--expected-subject <pattern>` | **Required.** At least one cert in each PEM file (bundle) must have a subject matching `<pattern>` (case-insensitive). |
-| *(default scope)* | Read `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. `UV_NATIVE_TLS` is not validated. |
+| *(default scope)* | Read `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY` and `SSL_CERT_FILE` from the current user’s `~/.zshrc` (with `~` expanded), then validate each referenced PEM file. A value of `truststore` fails the check. `UV_NATIVE_TLS` is not validated. |
 | `--all-users` | **(Root only.)** For each user in `/Users/*`, read their `~/.zshrc`, resolve cert paths, and validate each PEM. Use: `sudo ./validate_install_macos.sh --expected-subject <pattern> --all-users`. |
 
 **Requirements:** `openssl` on `PATH` (same paths as the install script are prepended).
@@ -253,7 +283,7 @@ Tests are black-box (exit codes and stdout/stderr). Paths are passed to the vali
 
 #### 1. Argument handling
 
-- **--package** defaults to `all` if omitted; must be `npm`, `python`, `huggingface`, or `all` (**all** = npm + Python TLS + Hugging Face Hub).
+- **--package** defaults to `all` if omitted; must be `npm`, `python`, `huggingface`, `conda`, or `all` (**all** = npm + Python TLS + Hugging Face Hub + Conda).
 - **Cert source** is one of:
   - **Keychain export:** `--extract-path` set; `--use-cert` must not be set.
   - **Use file:** `--use-cert` set; `--extract-path` must not be set.
@@ -302,6 +332,12 @@ For **Python TLS** (if `--package` is `python`, `huggingface`, or `all`):
 
 - Ensure `UV_NATIVE_TLS=true` and `UV_SYSTEM_CERTS=true`.
 - Add or replace `REQUESTS_CA_BUNDLE` so it points at the selected cert path.
+
+For **Conda** (if `--package` is `conda` or `all`):
+
+- Add or replace `CONDA_SSL_VERIFY` and `MAMBA_SSL_VERIFY` so they point at the selected cert path (the full Keychain export with `--extract-path`).
+- Ensure `PIXI_TLS_ROOT_CERTS=native`.
+- Add `SSL_CERT_FILE` pointing at the selected cert path **only if not already set** (pixi on macOS needs it; an existing value is left alone).
 
 For **Hugging Face Hub** (if `--package` is `huggingface` or `all`):
 
@@ -457,7 +493,7 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 | Option | Required | Description |
 |--------|----------|-------------|
 | `--use-cert <path>` | **Yes** | Path to an existing PEM/CRT file. |
-| `--package npm\|python\|huggingface\|all` | No (default: **all**) | What to configure. |
+| `--package npm\|python\|huggingface\|conda\|all` | No (default: **all**) | What to configure. `conda` / `all` write `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY`, `SSL_CERT_FILE` (all = system bundle) and `PIXI_TLS_ROOT_CERTS=native`. |
 | `--cert-name <name>` | No (default: `package-route-custom-ca`) | Base name for the file installed under `/usr/local/share/ca-certificates/<name>.crt` (not a Keychain/subject pattern). |
 | `-h`, `--help` | — | Usage. |
 
@@ -467,12 +503,13 @@ The same matrix runs on every push and pull request via `.github/workflows/ci.ym
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package npm
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package huggingface
+sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --package conda
 sudo ./install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem --cert-name my-org-ca
 ```
 
 ### Validation: validate_certs_debian_ubuntu.sh
 
-**`--expected-subject` is required.** Checks PEM paths from the current user’s `~/.bashrc` / `~/.zshrc` and, when present, **`/etc/profile.d/package-route-certs.sh`** (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`). With **`--all-users`** (root only), validates `/home/*` users’ rc files.
+**`--expected-subject` is required.** Checks PEM paths from the current user’s `~/.bashrc` / `~/.zshrc` and, when present, **`/etc/profile.d/package-route-certs.sh`** (`NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY`). With **`--all-users`** (root only), validates `/home/*` users’ rc files.
 
 ```bash
 ./validate_certs_debian_ubuntu.sh --expected-subject "O=Example"
@@ -628,6 +665,7 @@ Behavior matches **install_certs_macos.sh** (full trust-store PEM export, or use
 | **npm** | `NODE_USE_SYSTEM_CA`, `NODE_EXTRA_CA_CERTS` |
 | **python** / **huggingface** / **all** | `UV_NATIVE_TLS`, `UV_SYSTEM_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE` |
 | **ruby** / **all** | `SSL_CERT_FILE` |
+| **conda** / **all** | `CONDA_SSL_VERIFY`, `MAMBA_SSL_VERIFY`, `MAMBA_SSL_NO_REVOKE`, `PIXI_TLS_ROOT_CERTS` |
 | **huggingface** / **all** | `HF_HUB_DISABLE_XET`, `HF_HUB_ETAG_TIMEOUT`, `HF_HUB_DOWNLOAD_TIMEOUT` |
 
 Clears Docker Hub credentials for the current PowerShell user. When running as `SYSTEM`, this cleanup is skipped with a warning because it must run in the user's Windows session.
@@ -651,7 +689,7 @@ powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all 
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `-Package` | No (default: **all**) | `npm`, `python`, `huggingface`, `ruby`, or `all` (all = npm + Python TLS + Ruby + Hugging Face Hub). |
+| `-Package` | No (default: **all**) | `npm`, `python`, `huggingface`, `ruby`, `conda`, or `all` (all = npm + Python TLS + Ruby + Hugging Face Hub + Conda). |
 | `-ExtractPath` | Yes* | Directory under each user's profile for **package-route.pem** (rooted paths are normalized to a folder under the profile, same idea as macOS). Full trust-store export. Cannot be used with `-UseCert`. |
 | `-UseCert` | Yes* | Path to an existing PEM file. Cannot be used with `-ExtractPath`. |
 
@@ -698,7 +736,7 @@ After install, verify with **validate_install_windows.ps1 -ExpectedSubject** (se
 | Parameter | Description |
 |-----------|-------------|
 | `-ExpectedSubject <pattern>` | **Required.** At least one cert in each PEM file (bundle) must have a subject matching `<pattern>` (case-insensitive). |
-| *(default scope)* | Read `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, and `SSL_CERT_FILE` from the current user's environment (User then Machine), then validate each referenced PEM file. |
+| *(default scope)* | Read `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, `CONDA_SSL_VERIFY` and `MAMBA_SSL_VERIFY` from the current user's environment (User then Machine), then validate each referenced PEM file. |
 | `-AllUsers` | **(Admin only.)** For each user in `C:\Users\*`, read their User registry env, resolve cert paths, and validate each PEM. |
 
 **Exit code:** 0 if all checks passed, 1 if any check failed.

@@ -27,7 +27,7 @@ Options:
   --all-users                      Validate /home/* users' ~/.bashrc and ~/.zshrc (requires root).
   -h, --help                       Show this help
 
-Also validates $PROFILED_FILE when it exists (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE).
+Also validates $PROFILED_FILE when it exists (NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY).
 EOF
 }
 
@@ -65,6 +65,10 @@ FAIL=0
 
 validate_pem() {
     local path="$1"
+    if [[ "$path" == "truststore" ]]; then
+        echo "  FAIL: value 'truststore' is not supported (breaks conda < 23.11); use the full-store PEM path"
+        return 1
+    fi
     if [[ ! -f "$path" ]]; then
         echo "  FAIL: file does not exist: $path"
         return 1
@@ -137,6 +141,8 @@ validate_from_rc_files() {
         validate_path_deduped "$(get_export_path "$rc" "NODE_EXTRA_CA_CERTS" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "REQUESTS_CA_BUNDLE" "$home")"
         validate_path_deduped "$(get_export_path "$rc" "SSL_CERT_FILE" "$home")"
+        validate_path_deduped "$(get_export_path "$rc" "CONDA_SSL_VERIFY" "$home")"
+        validate_path_deduped "$(get_export_path "$rc" "MAMBA_SSL_VERIFY" "$home")"
     done
 
     if [[ $any -eq 0 ]]; then
@@ -145,7 +151,7 @@ validate_from_rc_files() {
     fi
 
     if [[ "$DEDUPE" == "|" ]]; then
-        echo "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, or SSL_CERT_FILE in rc files for $label"
+        echo "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, SSL_CERT_FILE, CONDA_SSL_VERIFY or MAMBA_SSL_VERIFY in rc files for $label"
     fi
 }
 
@@ -160,6 +166,8 @@ validate_profiled() {
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "NODE_EXTRA_CA_CERTS" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "REQUESTS_CA_BUNDLE" "")"
     validate_path_deduped "$(get_export_path "$PROFILED_FILE" "SSL_CERT_FILE" "")"
+    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "CONDA_SSL_VERIFY" "")"
+    validate_path_deduped "$(get_export_path "$PROFILED_FILE" "MAMBA_SSL_VERIFY" "")"
 
     if [[ "$DEDUPE" == "|" ]]; then
         echo "  WARN: no expected exports in $PROFILED_FILE"
