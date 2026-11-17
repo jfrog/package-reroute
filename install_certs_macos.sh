@@ -4,10 +4,11 @@
 # Run: sudo bash install_certs_macos.sh [OPTIONS]
 #
 # Options:
-#   --package npm|python|huggingface|all
+#   --package npm|python|huggingface|conda|all
 #     npm: Node only. python: Python TLS (uv, requests) only.
 #     huggingface: same as python plus Hugging Face Hub env vars.
-#     all: npm + python + huggingface.
+#     conda: Conda clients (conda, micromamba/mamba 2.x, pixi) TLS only.
+#     all: npm + python + huggingface + conda.
 #   --extract-path <path>      Path under each user's home for the PEM
 #                              (writes ~/<path>/package-route.pem). The PEM is a single
 #                              export of BOTH macOS Keychains (SystemRootCertificates +
@@ -15,7 +16,8 @@
 #                              enterprise SSL inspection CAs. Cannot be combined with --use-cert.
 #   --use-cert <path>          Path to an already-existing PEM cert file. Sets env vars
 #                              to point at this file; does not touch the Keychain.
-#                              Cannot be combined with --extract-path.
+#                              Cannot be combined with --extract-path. For conda this PEM MUST be the
+#                              FULL trust store (public roots + SASE root + intermediates), not SASE-only.
 #   --install-dependencies     If openssl is missing, install it via Homebrew and continue
 #
 # Either --extract-path OR --use-cert must be provided (exactly one).
@@ -26,6 +28,8 @@
 #   User's .zshrc gets these env vars (pointing at the PEM file):
 #     NODE_USE_SYSTEM_CA=1, NODE_EXTRA_CA_CERTS, UV_NATIVE_TLS=true,
 #     UV_SYSTEM_CERTS=true, REQUESTS_CA_BUNDLE,
+#     (for conda / all) CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY, PIXI_TLS_ROOT_CERTS=native,
+#     and SSL_CERT_FILE if not already set. NEVER CONDA_SSL_VERIFY=truststore.
 #     (for huggingface / all) HF_HUB_DISABLE_XET, HF_HUB_ETAG_TIMEOUT, HF_HUB_DOWNLOAD_TIMEOUT
 #
 #   Best-effort Docker Hub credential cleanup for the target user.
@@ -64,11 +68,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--package npm|python|huggingface|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
+            echo "Usage: $0 [--package npm|python|huggingface|conda|all] [--extract-path <path> | --use-cert <path>] [--install-dependencies]"
             echo ""
-            echo "  --package npm|python|huggingface|all"
+            echo "  --package npm|python|huggingface|conda|all"
             echo "                           npm: Node only. python: Python TLS (uv, requests). huggingface: python + Hugging Face Hub."
-            echo "                           all: npm + python + huggingface (default: all)"
+            echo "                           conda: Conda clients (conda, micromamba/mamba 2.x, pixi)."
+            echo "                           all: npm + python + huggingface + conda (default: all)"
             echo "  --extract-path <path>      Path under each user's home for the PEM (writes ~/<path>/package-route.pem as a full Keychain dump)"
             echo "  --use-cert <path>          Path to an existing PEM cert file (cannot be used with --extract-path)"
             echo "  --install-dependencies     Install openssl via Homebrew if missing, then continue"
@@ -87,7 +92,7 @@ done
 [ -z "$PACKAGE" ] && PACKAGE="all"
 
 case "$PACKAGE" in
-    npm|python|huggingface|all) ;;
+    npm|python|huggingface|conda|all) ;;
     *)
         echo "Error: --package must be npm, python, huggingface, or all (got: $PACKAGE)." >&2
         exit 1
@@ -120,6 +125,7 @@ fi
 
 do_npm() { [ "$PACKAGE" = "npm" ] || [ "$PACKAGE" = "all" ]; }
 do_python_tls() { [ "$PACKAGE" = "python" ] || [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
+do_conda() { [ "$PACKAGE" = "conda" ] || [ "$PACKAGE" = "all" ]; }
 do_huggingface() { [ "$PACKAGE" = "huggingface" ] || [ "$PACKAGE" = "all" ]; }
 
 DOCKER_HUB_KEYS=(
@@ -210,6 +216,16 @@ ensure_export() {
     fi
 }
 
+# Like ensure_export but writes a quoted path and replaces a differing value.
+ensure_export_quoted() {
+    local f="$1" var="$2" path="$3"
+    if [ -z "$(get_export_path "$f" "$var" "$(dirname "$f")")" ]; then
+        echo "export ${var}=\"$path\"" >> "$f"
+    else
+        replace_export_in_file "$f" "$var" "$path"
+    fi
+}
+
 if [ -n "$USE_CERT" ]; then
     echo "[1/4] Using existing certificate at $USE_CERT..."
     validate_pem "$USE_CERT" || { echo "[Error] Invalid or missing PEM at: $USE_CERT" >&2; exit 1; }
@@ -239,6 +255,18 @@ add_exports_to_file() {
             echo "export REQUESTS_CA_BUNDLE=\"$cert_path\"" >> "$f"
         else
             replace_export_in_file "$f" "REQUESTS_CA_BUNDLE" "$cert_path"
+        fi
+    fi
+    if do_conda; then
+        # conda (all versions) and micromamba/mamba 2.x take a PEM path; pixi 0.84+ reads the OS store.
+        # The PEM must be the FULL trust store: these clients replace their default roots, and the
+        # redirect hop to Artifactory is served with a public chain. Never "truststore" (breaks conda < 23.11).
+        ensure_export_quoted "$f" "CONDA_SSL_VERIFY" "$cert_path"
+        ensure_export_quoted "$f" "MAMBA_SSL_VERIFY" "$cert_path"
+        ensure_export "$f" "PIXI_TLS_ROOT_CERTS" "native"
+        # pixi (rustls) on macOS needs SSL_CERT_FILE; do not override an existing value.
+        if [ -z "$(get_export_path "$f" "SSL_CERT_FILE" "$(dirname "$f")")" ]; then
+            echo "export SSL_CERT_FILE=\"$cert_path\"" >> "$f"
         fi
     fi
     if do_huggingface; then

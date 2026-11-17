@@ -115,6 +115,7 @@ fi
 assert_exit 1 "'$INSTALL_SCRIPT' --package npm 2>/dev/null"
 assert_exit 1 "'$INSTALL_SCRIPT' --package python 2>/dev/null"
 assert_exit 1 "'$INSTALL_SCRIPT' --package huggingface 2>/dev/null"
+assert_exit 1 "'$INSTALL_SCRIPT' --package conda 2>/dev/null"
 
 echo ""
 echo "=== validate_install_macos.sh tests (temp PEM and mock home) ==="
@@ -132,6 +133,14 @@ echo "export NODE_EXTRA_CA_CERTS=\"$TMP/cert.pem\"" > "$MOCK_HOME/.zshrc"
 assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
 echo "export REQUESTS_CA_BUNDLE=\"$TMP/cert.pem\"" >> "$MOCK_HOME/.zshrc"
 assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
+
+# Conda vars: valid PEM paths pass; CONDA_SSL_VERIFY=truststore is rejected (breaks conda < 23.11)
+printf 'export CONDA_SSL_VERIFY="%s"\nexport MAMBA_SSL_VERIFY="%s"\nexport SSL_CERT_FILE="%s"\nexport PIXI_TLS_ROOT_CERTS=native\n' "$TMP/cert.pem" "$TMP/cert.pem" "$TMP/cert.pem" > "$MOCK_HOME/.zshrc"
+assert_exit 0 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert"
+echo "export CONDA_SSL_VERIFY=truststore" > "$MOCK_HOME/.zshrc"
+assert_exit 1 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert 2>/dev/null"
+echo "export MAMBA_SSL_VERIFY=\"$TMP/missing.pem\"" > "$MOCK_HOME/.zshrc"
+assert_exit 1 "HOME='$MOCK_HOME' '$VALIDATE_SCRIPT' --expected-subject test-cert 2>/dev/null"
 
 # Point .zshrc at missing file: should fail
 echo "export NODE_EXTRA_CA_CERTS=\"$TMP/missing.pem\"" > "$MOCK_HOME/.zshrc"

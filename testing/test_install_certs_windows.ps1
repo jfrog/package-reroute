@@ -31,7 +31,11 @@ $EnvVarsToRestore = @(
     "SSL_CERT_FILE",
     "HF_HUB_DISABLE_XET",
     "HF_HUB_ETAG_TIMEOUT",
-    "HF_HUB_DOWNLOAD_TIMEOUT"
+    "HF_HUB_DOWNLOAD_TIMEOUT",
+    "CONDA_SSL_VERIFY",
+    "MAMBA_SSL_VERIFY",
+    "MAMBA_SSL_NO_REVOKE",
+    "PIXI_TLS_ROOT_CERTS"
 )
 $SavedUserEnv = @{}
 $SavedMachineEnv = @{}
@@ -262,6 +266,32 @@ jXKK5iDphL7LcKir6SLHxmyU339SrjNtTpiSBTU=
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", $savedHfXet, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_ETAG_TIMEOUT", $savedHfEtag, "Machine")
         [Environment]::SetEnvironmentVariable("HF_HUB_DOWNLOAD_TIMEOUT", $savedHfDl, "Machine")
+    }
+
+    # -UseCert -Package conda: CONDA_SSL_VERIFY / MAMBA_SSL_VERIFY = supplied PEM, MAMBA_SSL_NO_REVOKE=true, PIXI_TLS_ROOT_CERTS=native (never "truststore")
+    try {
+        $rConda = Invoke-ScriptAndGetExitCode -ScriptPath $InstallScript -ScriptArguments @("-UseCert", $CertPath, "-Package", "conda")
+        $Run++
+        if ($rConda.ExitCode -ne 0) {
+            Write-Host "  FAIL ($Run): -UseCert -Package conda expected exit 0, got $($rConda.ExitCode)"
+            $script:Fail++
+        } else {
+            $cv = [Environment]::GetEnvironmentVariable("CONDA_SSL_VERIFY", "Machine")
+            $mv = [Environment]::GetEnvironmentVariable("MAMBA_SSL_VERIFY", "Machine")
+            $nr = [Environment]::GetEnvironmentVariable("MAMBA_SSL_NO_REVOKE", "Machine")
+            $pt = [Environment]::GetEnvironmentVariable("PIXI_TLS_ROOT_CERTS", "Machine")
+            if ((Test-SameCertPath $cv $CertPath) -and (Test-SameCertPath $mv $CertPath) -and $nr -eq "true" -and $pt -eq "native") {
+                Write-Host "  OK ($Run): -Package conda sets CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY (PEM), MAMBA_SSL_NO_REVOKE, PIXI_TLS_ROOT_CERTS"
+                $script:Pass++
+            } else {
+                Write-Host "  FAIL ($Run): CONDA_SSL_VERIFY='$cv' MAMBA_SSL_VERIFY='$mv' MAMBA_SSL_NO_REVOKE='$nr' PIXI_TLS_ROOT_CERTS='$pt'"
+                $script:Fail++
+            }
+        }
+    } finally {
+        foreach ($v in @("CONDA_SSL_VERIFY", "MAMBA_SSL_VERIFY", "MAMBA_SSL_NO_REVOKE", "PIXI_TLS_ROOT_CERTS")) {
+            [Environment]::SetEnvironmentVariable($v, $SavedMachineEnv[$v], "Machine")
+        }
     }
 
     # -UseCert -Package huggingface: Python TLS + HF Hub on Machine; all cert vars point at UseCert PEM

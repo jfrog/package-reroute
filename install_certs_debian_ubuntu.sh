@@ -4,7 +4,7 @@
 # via environment variables.
 #
 # Run:
-#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|python|huggingface|all]
+#   sudo bash install_certs_debian_ubuntu.sh --use-cert /path/to/cert.pem [--package npm|python|huggingface|conda|all]
 #
 # Examples:
 #   sudo bash install_certs_debian_ubuntu.sh --use-cert /tmp/company-ca.pem
@@ -26,6 +26,9 @@
 #   - npm uses the single installed custom cert
 #   - Python TLS: REQUESTS_CA_BUNDLE, SSL_CERT_FILE (python / huggingface / all)
 #   - Hugging Face Hub: HF_HUB_* (huggingface or all)
+#   - Conda clients (conda, micromamba/mamba 2.x, pixi): CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY,
+#     SSL_CERT_FILE (system bundle = full trust store), PIXI_TLS_ROOT_CERTS=native (conda or all).
+#     Never CONDA_SSL_VERIFY=truststore.
 #   - Best-effort Docker Hub credential cleanup for the target user
 #   - New terminals should pick up the env vars automatically
 
@@ -42,11 +45,11 @@ SYSTEM_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
 usage() {
     cat <<EOF
 Usage:
-  sudo $0 --use-cert <path> [--package npm|python|huggingface|all] [--cert-name <name>]
+  sudo $0 --use-cert <path> [--package npm|python|huggingface|conda|all] [--cert-name <name>]
 
 Options:
   --use-cert <path>       Path to an existing PEM/CRT certificate file
-  --package npm|python|huggingface|all   npm, python TLS, python+huggingface, or all (default: all)
+  --package npm|python|huggingface|conda|all   npm, python TLS, python+huggingface, conda, or all (default: all)
   --cert-name <name>      Base name for installed cert (default: ${CERT_BASENAME})
   -h, --help              Show this help
 
@@ -61,6 +64,7 @@ EOF
 
 do_npm() { [[ "$PACKAGE" == "npm" || "$PACKAGE" == "all" ]]; }
 do_python_tls() { [[ "$PACKAGE" == "python" || "$PACKAGE" == "huggingface" || "$PACKAGE" == "all" ]]; }
+do_conda() { [[ "$PACKAGE" == "conda" || "$PACKAGE" == "all" ]]; }
 do_huggingface() { [[ "$PACKAGE" == "huggingface" || "$PACKAGE" == "all" ]]; }
 
 DOCKER_HUB_KEYS=(
@@ -74,7 +78,7 @@ DOCKER_HUB_KEYS=(
 require_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: this script must be run as root." >&2
-        echo "Use: sudo $0 --use-cert <path> [--package npm|python|huggingface|all]" >&2
+        echo "Use: sudo $0 --use-cert <path> [--package npm|python|huggingface|conda|all]" >&2
         exit 1
     fi
 }
@@ -107,9 +111,9 @@ parse_args() {
     done
 
     case "$PACKAGE" in
-        npm|python|huggingface|all) ;;
+        npm|python|huggingface|conda|all) ;;
         *)
-            echo "Error: --package must be npm, python, huggingface, or all (got: $PACKAGE)." >&2
+            echo "Error: --package must be npm, python, huggingface, conda, or all (got: $PACKAGE)." >&2
             exit 1
             ;;
     esac
@@ -207,6 +211,13 @@ write_profiled() {
         if do_python_tls; then
             echo "export REQUESTS_CA_BUNDLE=\"$SYSTEM_CA_BUNDLE\""
             echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
+            echo
+        fi
+        if do_conda; then
+            echo "export CONDA_SSL_VERIFY=\"$SYSTEM_CA_BUNDLE\""
+            echo "export MAMBA_SSL_VERIFY=\"$SYSTEM_CA_BUNDLE\""
+            echo "export SSL_CERT_FILE=\"$SYSTEM_CA_BUNDLE\""
+            echo "export PIXI_TLS_ROOT_CERTS=native"
             echo
         fi
         if do_huggingface; then
@@ -323,6 +334,12 @@ update_user_shell_rc() {
         ensure_export_in_file "$rc_file" "REQUESTS_CA_BUNDLE" "$SYSTEM_CA_BUNDLE"
         ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
     fi
+    if do_conda; then
+        ensure_export_in_file "$rc_file" "CONDA_SSL_VERIFY" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "MAMBA_SSL_VERIFY" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "SSL_CERT_FILE" "$SYSTEM_CA_BUNDLE"
+        ensure_export_in_file "$rc_file" "PIXI_TLS_ROOT_CERTS" "native"
+    fi
     if do_huggingface; then
         ensure_export_in_file "$rc_file" "HF_HUB_DISABLE_XET" "1"
         ensure_export_in_file "$rc_file" "HF_HUB_ETAG_TIMEOUT" "86400"
@@ -415,6 +432,14 @@ print_done() {
         echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
         echo
     fi
+    if do_conda; then
+        echo "Conda environment (conda, micromamba/mamba 2.x, pixi):"
+        echo "  CONDA_SSL_VERIFY=$SYSTEM_CA_BUNDLE"
+        echo "  MAMBA_SSL_VERIFY=$SYSTEM_CA_BUNDLE"
+        echo "  SSL_CERT_FILE=$SYSTEM_CA_BUNDLE"
+        echo "  PIXI_TLS_ROOT_CERTS=native"
+        echo
+    fi
     if do_huggingface; then
         echo "Hugging Face Hub:"
         echo "  HF_HUB_DISABLE_XET=1"
@@ -436,6 +461,9 @@ print_done() {
         echo "  python3 -m venv .venv"
         echo "  source .venv/bin/activate"
         echo "  pip install requests"
+    fi
+    if do_conda; then
+        echo "  conda info   # or: micromamba info / pixi info"
     fi
 }
 

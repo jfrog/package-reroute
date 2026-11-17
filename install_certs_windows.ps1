@@ -4,14 +4,17 @@
 #   Or: powershell -ExecutionPolicy Bypass -File install_certs_windows.ps1 -Package all -UseCert C:\path\to\ca.pem
 #
 # Parameters:
-#   -Package npm|python|huggingface|ruby|all
-#     npm / python / huggingface / ruby / all (all = npm + Python TLS + Ruby + Hugging Face Hub)
+#   -Package npm|python|huggingface|ruby|conda|all
+#     npm / python / huggingface / ruby / conda / all (all = npm + Python TLS + Ruby + Hugging Face Hub + Conda)
+#     conda: conda, micromamba/mamba 2.x, pixi. Sets CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY (PEM path),
+#     MAMBA_SSL_NO_REVOKE=true, PIXI_TLS_ROOT_CERTS=native. Never CONDA_SSL_VERIFY=truststore.
 #   -ExtractPath <path>    Directory for the PEM (writes <path>\package-route.pem); relative to each
 #                          user's profile or absolute. Full export of Windows trust stores (Root,
 #                          AuthRoot, and Intermediate CA stores) — system roots, enterprise CAs, and
 #                          intermediates (e.g. NetSkope signing CAs). Cannot be used with -UseCert.
 #   -UseCert <path>        Path to an existing PEM cert file. Sets env vars to point at this file; does
-#                          not touch the cert store. Cannot be used with -ExtractPath.
+#                          not touch the cert store. Cannot be used with -ExtractPath. For conda the PEM
+#                          MUST be the FULL trust store (public roots + SASE root + intermediates).
 #
 # Either -ExtractPath OR -UseCert must be provided (exactly one).
 #
@@ -22,7 +25,7 @@
 
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet("npm", "python", "huggingface", "ruby", "all")]
+    [ValidateSet("npm", "python", "huggingface", "ruby", "conda", "all")]
     [string]$Package = "all",
 
     [Parameter(Mandatory = $false)]
@@ -59,6 +62,7 @@ $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 function DoNpm { $Package -eq 'npm' -or $Package -eq 'all' }
 function DoPythonTls { $Package -eq 'python' -or $Package -eq 'huggingface' -or $Package -eq 'all' }
 function DoHuggingface { $Package -eq 'huggingface' -or $Package -eq 'all' }
+function DoConda { $Package -eq 'conda' -or $Package -eq 'all' }
 function DoRuby { $Package -eq 'ruby' -or $Package -eq 'all' }
 
 $DockerHubKeys = @(
@@ -341,6 +345,12 @@ function Set-UserEnvRegistryValues {
     if ($DoRuby) {
         Set-ItemProperty -Path $KeyPath -Name "SSL_CERT_FILE" -Value $CertPath -Type String -Force
     }
+    if (DoConda) {
+        Set-ItemProperty -Path $KeyPath -Name "CONDA_SSL_VERIFY" -Value $CertPath -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "MAMBA_SSL_VERIFY" -Value $CertPath -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "MAMBA_SSL_NO_REVOKE" -Value "true" -Type String -Force
+        Set-ItemProperty -Path $KeyPath -Name "PIXI_TLS_ROOT_CERTS" -Value "native" -Type String -Force
+    }
     if ($DoHuggingface) {
         Set-ItemProperty -Path $KeyPath -Name "HF_HUB_DISABLE_XET" -Value "1" -Type String -Force
         Set-ItemProperty -Path $KeyPath -Name "HF_HUB_ETAG_TIMEOUT" -Value "86400" -Type String -Force
@@ -407,6 +417,7 @@ function Clear-CertEnvVars {
     if ($DoNpm) { $vars += @("NODE_EXTRA_CA_CERTS", "NODE_USE_SYSTEM_CA") }
     if ($DoPythonTls) { $vars += @("UV_NATIVE_TLS", "UV_SYSTEM_CERTS", "REQUESTS_CA_BUNDLE", "SSL_CERT_FILE") }
     elseif ($DoRuby) { $vars += @("SSL_CERT_FILE") }
+    if (DoConda) { $vars += @("CONDA_SSL_VERIFY", "MAMBA_SSL_VERIFY", "MAMBA_SSL_NO_REVOKE", "PIXI_TLS_ROOT_CERTS") }
     if ($DoHuggingface) { $vars += @("HF_HUB_DISABLE_XET", "HF_HUB_ETAG_TIMEOUT", "HF_HUB_DOWNLOAD_TIMEOUT") }
     foreach ($var in ($vars | Select-Object -Unique)) {
         Remove-CertEnvVar -VarName $var -Scope $Scope
@@ -427,6 +438,12 @@ function Set-CurrentUserCertEnvVars {
     }
     if ($DoRuby) {
         [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $CertPath, "User")
+    }
+    if (DoConda) {
+        [Environment]::SetEnvironmentVariable("CONDA_SSL_VERIFY", $CertPath, "User")
+        [Environment]::SetEnvironmentVariable("MAMBA_SSL_VERIFY", $CertPath, "User")
+        [Environment]::SetEnvironmentVariable("MAMBA_SSL_NO_REVOKE", "true", "User")
+        [Environment]::SetEnvironmentVariable("PIXI_TLS_ROOT_CERTS", "native", "User")
     }
     if ($DoHuggingface) {
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", "User")
@@ -449,6 +466,12 @@ function Set-ScopedCertEnvVars {
     }
     if ($DoRuby) {
         [Environment]::SetEnvironmentVariable("SSL_CERT_FILE", $CertPath, $Scope)
+    }
+    if (DoConda) {
+        [Environment]::SetEnvironmentVariable("CONDA_SSL_VERIFY", $CertPath, $Scope)
+        [Environment]::SetEnvironmentVariable("MAMBA_SSL_VERIFY", $CertPath, $Scope)
+        [Environment]::SetEnvironmentVariable("MAMBA_SSL_NO_REVOKE", "true", $Scope)
+        [Environment]::SetEnvironmentVariable("PIXI_TLS_ROOT_CERTS", "native", $Scope)
     }
     if ($DoHuggingface) {
         [Environment]::SetEnvironmentVariable("HF_HUB_DISABLE_XET", "1", $Scope)
@@ -543,6 +566,7 @@ if ($certMode -eq "Extract") {
             Write-Host "   + UV_NATIVE_TLS, UV_SYSTEM_CERTS set; REQUESTS_CA_BUNDLE and SSL_CERT_FILE set to $certPath"
         }
         if ((DoRuby) -and -not (DoPythonTls)) { Write-Host "   + SSL_CERT_FILE set to $certPath" }
+        if (DoConda) { Write-Host "   + CONDA_SSL_VERIFY and MAMBA_SSL_VERIFY set to $certPath; MAMBA_SSL_NO_REVOKE=true; PIXI_TLS_ROOT_CERTS=native" }
         if (DoHuggingface) { Write-Host "   + Hugging Face Hub timeouts / HF_HUB_DISABLE_XET set." }
     }
 }
@@ -557,6 +581,7 @@ if ($certMode -eq "UseCert") {
         if (DoHuggingface) { Write-Host "   + HF_HUB_DISABLE_XET and HF Hub timeouts set." }
     }
     if ((DoRuby) -and -not (DoPythonTls)) { Write-Host "   + SSL_CERT_FILE set to $UseCert" }
+    if (DoConda) { Write-Host "   + CONDA_SSL_VERIFY and MAMBA_SSL_VERIFY set to $UseCert; MAMBA_SSL_NO_REVOKE=true; PIXI_TLS_ROOT_CERTS=native" }
     if ($envScope -eq "Machine") {
         Clear-CertEnvVars -Scope "User" -DoNpm:(DoNpm) -DoPythonTls:(DoPythonTls) -DoRuby:(DoRuby) -DoHuggingface:(DoHuggingface)
         Write-Host "   + Cleared User-level cert vars so Machine settings apply."

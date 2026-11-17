@@ -38,6 +38,10 @@ FAIL=0
 # If EXPECTED_SUBJECT is set, at least one cert in the file must have a subject matching it (case-insensitive).
 validate_pem() {
     local path="$1"
+    if [ "$path" = "truststore" ]; then
+        echo "  FAIL: value 'truststore' is not supported (breaks conda < 23.11); use the full-store PEM path"
+        return 1
+    fi
     if [ ! -f "$path" ]; then
         echo "  FAIL: file does not exist: $path"
         return 1
@@ -74,7 +78,7 @@ get_export_path() {
 # For one user: read .zshrc, get cert paths from exports, validate each PEM. Skips if no .zshrc or no exports.
 validate_user_config() {
     local zshrc="$1" home="$2" label="${3:-$zshrc}"
-    local node_path pip_path
+    local node_path pip_path conda_path mamba_path ssl_path
 
     if [ ! -f "$zshrc" ]; then
         echo "  SKIP: no .zshrc at $zshrc"
@@ -83,9 +87,12 @@ validate_user_config() {
 
     node_path=$(get_export_path "$zshrc" "NODE_EXTRA_CA_CERTS" "$home")
     pip_path=$(get_export_path "$zshrc" "REQUESTS_CA_BUNDLE" "$home")
+    conda_path=$(get_export_path "$zshrc" "CONDA_SSL_VERIFY" "$home")
+    mamba_path=$(get_export_path "$zshrc" "MAMBA_SSL_VERIFY" "$home")
+    ssl_path=$(get_export_path "$zshrc" "SSL_CERT_FILE" "$home")
 
-    if [ -z "$node_path" ] && [ -z "$pip_path" ]; then
-        echo "  WARN: no NODE_EXTRA_CA_CERTS or REQUESTS_CA_BUNDLE in $label"
+    if [ -z "$node_path$pip_path$conda_path$mamba_path$ssl_path" ]; then
+        echo "  WARN: no NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE, CONDA_SSL_VERIFY, MAMBA_SSL_VERIFY or SSL_CERT_FILE in $label"
         return 0
     fi
 
@@ -96,6 +103,14 @@ validate_user_config() {
     if [ -n "$pip_path" ] && [ "$pip_path" != "$node_path" ]; then
         validate_pem "$pip_path" || FAIL=$((FAIL+1))
     fi
+    # Conda clients: each distinct path must be a valid PEM (the full trust store, not SASE-only).
+    local seen=" $node_path $pip_path " p
+    for p in "$conda_path" "$mamba_path" "$ssl_path"; do
+        [ -z "$p" ] && continue
+        case "$seen" in *" $p "*) continue ;; esac
+        seen="$seen$p "
+        validate_pem "$p" || FAIL=$((FAIL+1))
+    done
 }
 
 if [ "$ALL_USERS" -eq 1 ]; then
@@ -112,7 +127,7 @@ if [ "$ALL_USERS" -eq 1 ]; then
         validate_user_config "$homedir/.zshrc" "$homedir" "user $user"
     done
 else
-    # Default: current user only. Reads ~/.zshrc and validates NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE paths.
+    # Default: current user only. Reads ~/.zshrc and validates NODE_EXTRA_CA_CERTS / REQUESTS_CA_BUNDLE / CONDA_SSL_VERIFY / MAMBA_SSL_VERIFY / SSL_CERT_FILE paths.
     echo "Validating current user config (~/.zshrc) and cert path(s)..."
     [ -z "$HOME" ] && HOME=$(eval echo ~)
     validate_user_config "$HOME/.zshrc" "$HOME" "current user"
